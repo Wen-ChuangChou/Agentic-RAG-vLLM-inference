@@ -7,6 +7,7 @@ This script evaluates and compares three different Question-Answering (QA) syste
 The evaluation is performed using a Hugging Face dataset and an LLM-as-judge for scoring.
 It uses checkpointing to allow resuming long-running evaluations.
 """
+import argparse
 import os
 import datasets
 import pandas as pd
@@ -16,7 +17,7 @@ from pathlib import Path
 from smolagents import OpenAIServerModel, CodeAgent
 from smolagents.monitoring import LogLevel
 from utils.agent_tools import RetrieverTool
-from utils.blablador_helper import BlabladorChatModel
+from utils.model_factory import create_llm
 from utils.checkpoint_runner import run_with_checkpoint, run_evaluation_with_checkpoint
 from utils.results_manager import save_evaluation_results
 from utils.vectordb_utils import load_or_create_vectordb
@@ -107,40 +108,48 @@ def fill_score(x, default_score):
 def main():
     # Initialize environment and paths
     load_dotenv()
+
+    parser = argparse.ArgumentParser(
+        description="Agentic RAG evaluation pipeline")
+    parser.add_argument(
+        "--config",
+        default="config.yaml",
+        help="Path to YAML configuration file (default: config.yaml)")
+    args = parser.parse_args()
+
+    # Load configuration
+    config_path = Path(args.config)
+    with open(config_path, "r", encoding="utf-8") as f:
+        config = yaml.safe_load(f)
+
     dataset_name = "m-ric/huggingface_doc"
     RESULTS_DIR = Path("results")
     CHECKPOINTS_DIR = Path("checkpoints")
 
     # Configurable parameters for vector DB and processing
-    config = {
-        "batch_size": 50,
-        "max_workers": 4,
-        "doc_chunk_size": 100,  # Parallel processing batch size
-        "text_chunk_size": 200,  # Document content chunk size (tokens) 
-        "text_chunk_overlap": 40,  # Overlap between chunks
-        "force_rebuild": False,
-        "use_parallel": True
+    vdb_cfg = config.get("vectordb", {})
+    vectordb_config = {
+        "batch_size": vdb_cfg.get("batch_size", 50),
+        "max_workers": vdb_cfg.get("max_workers", 4),
+        "doc_chunk_size": vdb_cfg.get("doc_chunk_size", 100),
+        "text_chunk_size": vdb_cfg.get("text_chunk_size", 200),
+        "text_chunk_overlap": vdb_cfg.get("text_chunk_overlap", 40),
+        "force_rebuild": vdb_cfg.get("force_rebuild", False),
+        "use_parallel": vdb_cfg.get("use_parallel", True),
     }
 
     # Load or create vector database for retrieval
-    vectordb = load_or_create_vectordb(dataset_name, **config)
+    vectordb = load_or_create_vectordb(dataset_name, **vectordb_config)
     eval_dataset = datasets.load_dataset("m-ric/huggingface_doc_qa_eval",
                                          split="train")
 
-    # Initialize LLM via Blablador
-    API_KEY = os.getenv("Blablador_API_KEY")
-    LLM_helper = BlabladorChatModel(api_key=API_KEY)
-    model_name = "Qwen3.5 122B"  # Options: Qwen3.5 122B, MiniMax-M2.5, NVIDIA-Nemotron
-    model_fullname = LLM_helper.get_model_fullname(model_name)
+    # Initialize LLM (vLLM or Blablador, based on config)
+    answer_llm, model_fullname = create_llm(config, role="answer")
+    model_name = model_fullname.split("/")[-1]  # Short name for filenames
+    print(f"Backend: {config['backend']}")
     print(f"The agentic RAG uses the following model: {model_fullname}\n")
 
-    TEMPERATURE = 0.2
-    answer_llm = OpenAIServerModel(
-        model_id=model_fullname,
-        api_base="https://api.helmholtz-blablador.fz-juelich.de/v1",
-        api_key=API_KEY,
-        max_tokens=16384,
-        temperature=TEMPERATURE)
+    TEMPERATURE = config.get(config["backend"], {}).get("temperature", 0.2)
 
     # Setup Agentic RAG components
     retriever_tool = RetrieverTool(vectordb)
@@ -210,16 +219,10 @@ def main():
     with open(eval_prompt_path, "r", encoding="utf-8") as f:
         evaluation_prompt = yaml.safe_load(f)
 
-    eval_model_name = "GPT-OSS-120b"
-    eval_model_fullname = LLM_helper.get_model_fullname(eval_model_name)
+    evaluation_llm, eval_model_fullname = create_llm(config,
+                                                     role="evaluation")
+    eval_model_name = eval_model_fullname.split("/")[-1]
     print(f"Performance Evaluation Model: {eval_model_fullname}\n")
-
-    evaluation_llm = OpenAIServerModel(
-        model_id=eval_model_fullname,
-        api_base="https://api.helmholtz-blablador.fz-juelich.de/v1",
-        api_key=API_KEY,
-        max_tokens=16384,
-        temperature=0)
 
     # Perform evaluation of all system outputs
     evaluated = run_evaluation_with_checkpoint(
@@ -266,7 +269,7 @@ def main():
         "eval_model_name": eval_model_name,
         "eval_model_id": eval_model_fullname,
     }
-    eval_performance_filename = f"{model_name}_vect{config['text_chunk_size']}_t{TEMPERATURE}.json"
+    eval_performance_filename = f"{model_name}_vect{vectordb_config['text_chunk_size']}_t{TEMPERATURE}.json"
     save_evaluation_results(meta_data, results, RESULTS_DIR,
                             eval_performance_filename)
 

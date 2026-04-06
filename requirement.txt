@@ -5,10 +5,10 @@ annotated-doc==0.0.4
 annotated-types==0.7.0
 anyio==4.12.1
 attrs==25.4.0
-certifi==2026.2.25
-charset-normalizer==3.4.5
+certifi
+charset-normalizer
 click==8.3.1
-cuda-bindings==13.0.3
+cuda-bindings
 cuda-pathfinder==1.2.2
 dataclasses-json==0.6.7
 datasets==4.7.0
@@ -17,7 +17,6 @@ distro==1.9.0
 dotenv==0.9.9
 faiss-cpu==1.13.2
 filelock==3.25.2
-flit_core @ file:///dev/shm/stre766f/build/Python/3.12.3/GCCcore-13.3.0/flit_core/flit_core-3.9.0
 frozenlist==1.8.0
 fsspec==2026.2.0
 greenlet==3.3.2
@@ -26,24 +25,23 @@ hf-xet==1.4.2
 httpcore==1.0.9
 httpx==0.28.1
 httpx-sse==0.4.3
-huggingface_hub==1.7.1
-idna==3.11
+huggingface_hub==0.36.0
+idna
 Jinja2==3.1.6
 jiter==0.13.0
 joblib==1.5.3
 jsonpatch==1.33
 jsonpointer==3.0.0
-langchain==1.2.12
-langchain-classic==1.0.3
-langchain-community==0.4.1
-langchain-core==1.2.19
-langchain-huggingface==1.2.1
-langchain-text-splitters==1.1.1
-langgraph==1.1.2
+langchain
+langchain-community
+langchain-core
+langchain-huggingface
+langchain-text-splitters
+langgraph
 langgraph-checkpoint==4.0.1
-langgraph-prebuilt==1.0.8
+langgraph-prebuilt
 langgraph-sdk==0.3.11
-langsmith==0.7.17
+langsmith
 markdown-it-py==4.0.0
 MarkupSafe==3.0.3
 marshmallow==3.26.2
@@ -51,40 +49,40 @@ mdurl==0.1.2
 mpmath==1.3.0
 multidict==6.7.1
 multiprocess==0.70.18
-mypy_extensions==1.1.0
+mypy_extensions
 networkx==3.6.1
 numpy==2.4.3
-nvidia-cublas==13.1.0.3
-nvidia-cublas-cu12==12.1.3.1
-nvidia-cuda-cupti==13.0.85
-nvidia-cuda-cupti-cu12==12.1.105
-nvidia-cuda-nvrtc==13.0.88
-nvidia-cuda-nvrtc-cu12==12.1.105
-nvidia-cuda-runtime==13.0.96
-nvidia-cuda-runtime-cu12==12.1.105
-nvidia-cudnn-cu12==9.1.0.70
-nvidia-cudnn-cu13==9.15.1.9
-nvidia-cufft==12.0.0.61
-nvidia-cufft-cu12==11.0.2.54
-nvidia-cufile==1.15.1.6
-nvidia-curand==10.4.0.35
-nvidia-curand-cu12==10.3.2.106
-nvidia-cusolver==12.0.4.66
-nvidia-cusolver-cu12==11.4.5.107
-nvidia-cusparse==12.6.3.3
-nvidia-cusparse-cu12==12.1.0.106
-nvidia-cusparselt-cu13==0.8.0
-nvidia-nccl-cu12==2.21.5
-nvidia-nccl-cu13==2.28.9
-nvidia-nvjitlink==13.0.88
-nvidia-nvjitlink-cu12==12.9.86
-nvidia-nvshmem-cu13==3.4.5
-nvidia-nvtx==13.0.85
-nvidia-nvtx-cu12==12.1.105
+nvidia-cublas==13.1.0.3; sys_platform == 'linux'
+nvidia-cublas-cu12; sys_platform == 'linux'
+nvidia-cuda-cupti==13.0.85; sys_platform == 'linux'
+nvidia-cuda-cupti-cu12; sys_platform == 'linux'
+nvidia-cuda-nvrtc==13.0.88; sys_platform == 'linux'
+nvidia-cuda-nvrtc-cu12; sys_platform == 'linux'
+nvidia-cuda-runtime==13.0.96; sys_platform == 'linux'
+nvidia-cuda-runtime-cu12; sys_platform == 'linux'
+nvidia-cudnn-cu12; sys_platform == 'linux'
+nvidia-cudnn-cu13; sys_platform == 'linux'
+nvidia-cufft==12.0.0.61; sys_platform == 'linux'
+nvidia-cufft-cu12; sys_platform == 'linux'
+nvidia-cufile==1.15.1.6; sys_platform == 'linux'
+nvidia-curand==10.4.0.35; sys_platform == 'linux'
+nvidia-curand-cu12; sys_platform == 'linux'
+nvidia-cusolver==12.0.4.66; sys_platform == 'linux'
+nvidia-cusolver-cu12; sys_platform == 'linux'
+nvidia-cusparse==12.6.3.3; sys_platform == 'linux'
+nvidia-cusparse-cu12; sys_platform == 'linux'
+nvidia-cusparselt-cu13==0.8.0; sys_platform == 'linux'
+nvidia-nccl-cu12==2.21.5; sys_platform == 'linux'
+nvidia-nccl-cu13==2.28.9; sys_platform == 'linux'
+nvidia-nvjitlink==13.0.88; sys_platform == 'linux'
+nvidia-nvjitlink-cu12==12.9.86; sys_platform == 'linux'
+nvidia-nvshmem-cu13==3.4.5; sys_platform == 'linux'
+nvidia-nvtx==13.0.85; sys_platform == 'linux'
+nvidia-nvtx-cu12; sys_platform == 'linux'
 openai==2.28.0
 orjson==3.11.7
 ormsgpack==1.12.2
-packaging==26.0
+packaging
 pandas==3.0.1
 pillow==12.1.1
 propcache==0.4.1
@@ -97,39 +95,41 @@ python-dateutil==2.9.0.post0
 python-dotenv==1.2.2
 PyYAML==6.0.3
 regex==2026.2.28
-requests==2.32.5
-requests-toolbelt==1.0.0
+requests
+requests-toolbelt
 rich==14.3.3
 safetensors==0.7.0
 scikit-learn==1.8.0
 scipy==1.17.1
 sentence-transformers==5.3.0
 setuptools==70.2.0
-setuptools-scm @ file:///dev/shm/stre766f/build/Python/3.12.3/GCCcore-13.3.0/setuptools_scm/setuptools_scm-8.1.0
 shellingham==1.5.4
 six==1.17.0
 smolagents==1.24.0
 sniffio==1.3.1
 SQLAlchemy==2.0.48
 sympy==1.13.1
-tenacity==9.1.4
+tenacity>=8.1.0,<9.0.0
 threadpoolctl==3.6.0
 tokenizers==0.22.2
-tomli @ file:///dev/shm/stre766f/build/Python/3.12.3/GCCcore-13.3.0/tomli/tomli-2.0.1
-torch==2.5.1+cu121
-torchaudio==2.5.1+cu121
-torchvision==0.20.1+cu121
-tqdm==4.67.3
-transformers==5.3.0
-triton==3.1.0
+torch==2.5.1+cu121; sys_platform == 'linux'
+torchaudio==2.5.1+cu121; sys_platform == 'linux'
+torchvision==0.20.1+cu121; sys_platform == 'linux'
+torch==2.5.1+cpu; sys_platform == 'win32'
+torchaudio==2.5.1+cpu; sys_platform == 'win32'
+torchvision==0.20.1+cpu; sys_platform == 'win32'
+--extra-index-url https://download.pytorch.org/whl/cpu
+--extra-index-url https://download.pytorch.org/whl/cu121
+tqdm
+transformers
+triton; sys_platform == 'linux'
 typer==0.24.1
 typing-inspect==0.9.0
 typing-inspection==0.4.2
 typing_extensions==4.15.0
-urllib3==2.6.3
+urllib3
 uuid_utils==0.14.1
 uv==0.10.10
-wheel @ file:///dev/shm/stre766f/build/Python/3.12.3/GCCcore-13.3.0/wheel/wheel-0.43.0
 xxhash==3.6.0
 yarl==1.23.0
 zstandard==0.25.0
