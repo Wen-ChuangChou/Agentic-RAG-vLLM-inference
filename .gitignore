@@ -4,6 +4,7 @@ checkpoints/
 vectordb/
 doc/
 .venv/
+logs/
 .gradio
 *pycache*
 .env

@@ -12,20 +12,23 @@
 #============================================================================
 
 #SBATCH --job-name=vllm-server
-#SBATCH --output=logs/vllm-server-%j.out
-#SBATCH --error=logs/vllm-server-%j.err
+#SBATCH --output=logs/vllm-server-%x-%j.out
+#SBATCH --error=logs/vllm-server-%x-%j.err
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=4
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=256G
-#SBATCH --time=08:00:00
+#SBATCH --time=00:20:00
 #SBATCH --partition=capella
+#SBATCH --mail-user=wen-chuang.chou@tu-dresden.de
+#SBATCH --mail-type=BEGIN
+#SBATCH --licenses=cat # Special license requirement for Capella Partition
 
 # ==========================================================================
 # Configuration — edit these variables for your model and environment
 # ==========================================================================
-MODEL_NAME="${VLLM_MODEL:-zai-org/GLM-4.7-FP8}"          # HuggingFace model ID
+MODEL_NAME="${VLLM_MODEL:-zai-org/GLM-4.7-Flash}"          # HuggingFace model ID
 MODEL_PATH="${VLLM_MODEL_PATH:-}"                   # Local path (if pre-downloaded)
 PORT="${VLLM_PORT:-8000}"
 TP_SIZE="${VLLM_TP_SIZE:-4}"                        # tensor_parallel_size
@@ -33,7 +36,7 @@ EP="${VLLM_EP:-}"                                   # expert parallelism (MoE on
 MAX_MODEL_LEN="${VLLM_MAX_MODEL_LEN:-16384}"
 GPU_MEM_UTIL="${VLLM_GPU_MEM_UTIL:-0.92}"
 DTYPE="${VLLM_DTYPE:-auto}"                         # auto, bfloat16, float16, fp8
-API_KEY="${VLLM_API_KEY:-vllm-secret-key}"
+API_KEY="${VLLM_API_KEY:-ai4all}"
 ENABLE_PREFIX_CACHING="${VLLM_PREFIX_CACHE:-true}"
 
 # === NVMe local staging (optional) ===
@@ -50,10 +53,9 @@ NVME_MOUNT="/tmp"           # Local NVMe SSD mount point on compute nodes
 # ==========================================================================
 # Environment setup — customize module loads for your HPC
 # ==========================================================================
-# module purge
-# module load CUDA/12.x
-# module load cuDNN/...
-# source /path/to/your/vllm-env/bin/activate
+module purge
+module load release/25.06 GCCcore/13.3.0 Python/3.12.3 CUDA/13.0.0
+source .venv/bin/activate
 
 # Create log directory
 mkdir -p logs
