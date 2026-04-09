@@ -13,8 +13,8 @@ vllm:
   # Set this to http://<hpc-node-hostname>:8000/v1 after launching the server.
   # When client and server run on the same node, use localhost.
   api_base: "http://localhost:8000/v1"
-  api_key: "vllm-secret-key"               # Must match --api-key in launch script
-  model_id: "zai-org/GLM-5"                # Must match --served-model-name in launch script
+  api_key: "ai4all"               # Must match --api-key in launch script
+  model_id: "zai-org/GLM-4.7-Flash"                # Must match --served-model-name in launch script
   temperature: 0.2
   max_tokens: 16384
 
@@ -35,7 +35,7 @@ evaluation:
   # --- vLLM eval settings (if backend is "vllm") ---
   # model_id: "zai-org/GLM-5"
   # api_base: "http://localhost:8000/v1"
-  # api_key: "vllm-secret-key"
+  # api_key: "ai4all"
   temperature: 0.0
   max_tokens: 16384
 
