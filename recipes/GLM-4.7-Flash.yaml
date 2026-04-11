@@ -1,0 +1,48 @@
+# ==========================================================================
+# Hybrid Agentic RAG Configuration — GLM-4.7-Flash
+# ==========================================================================
+# Three-phase pipeline:
+#   Phase 1 (Offline): Standard RAG + Vanilla via vllm.LLM.generate()
+#   Phase 2 (Server):  Concurrent Agentic RAG via vLLM server + asyncio
+#   Phase 3 (Offline): Judge evaluation via vllm.LLM.generate()
+
+# === Main model (Phases 1 & 2) ===
+model:
+  model_id: "zai-org/GLM-4.7-Flash"
+  model_path: ""                            # Set by VLLM_MODEL_PATH env var or NVMe staging
+  tensor_parallel_size: 2
+  gpu_memory_utilization: 0.92
+  max_model_len: 131072
+  dtype: "auto"
+  trust_remote_code: true
+  temperature: 0.2
+  max_tokens: 16384
+
+# === vLLM server settings (Phase 2 only) ===
+server:
+  port: 8000
+  api_key: "ai4all"
+  host: "0.0.0.0"
+  extra_args: []                            # e.g., ["--speculative-config.method", "mtp"]
+
+# === Evaluation judge model (Phase 3) ===
+evaluation:
+  model_id: "openai/gpt-oss-120b"
+  model_path: ""                            # Set by VLLM_JUDGE_MODEL_PATH env var
+  temperature: 0.0
+  max_tokens: 16384
+
+# === Async agentic settings (Phase 2) ===
+async:
+  concurrency: 16                           # Number of concurrent agentic queries
+  checkpoint_interval: 5                    # Save checkpoint every N completions
+
+# === Vector DB config ===
+vectordb:
+  batch_size: 50
+  max_workers: 4
+  doc_chunk_size: 100
+  text_chunk_size: 200
+  text_chunk_overlap: 40
+  force_rebuild: false
+  use_parallel: true
