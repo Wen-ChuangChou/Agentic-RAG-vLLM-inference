@@ -8,6 +8,7 @@ optimised call, eliminating HTTP overhead and maximising GPU utilisation.
 
 import gc
 import json
+import re
 import time
 import torch
 from datetime import datetime
@@ -52,7 +53,23 @@ def release_offline_llm(llm: LLM) -> None:
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
     # Brief pause to let GPU memory fully release
-    time.sleep(2)
+    time.sleep(5)
+    print("GPU memory released.")
+
+
+def strip_thinking(text: str) -> str:
+    """
+    Remove ``<think>...</think>`` reasoning blocks from model output.
+
+    Reasoning models like GLM-4.7-Flash wrap their chain-of-thought in
+    ``<think>`` tags.  For evaluation we only want the final answer.
+    """
+    # If there's a closing </think> tag, take everything after it
+    if "</think>" in text:
+        text = text.split("</think>", 1)[1]
+    # Also strip any remaining opening tags (edge case: no closing tag)
+    text = re.sub(r"<think>.*", "", text, flags=re.DOTALL)
+    return text.strip()
 
 
 # ---------------------------------------------------------------------------
@@ -153,7 +170,7 @@ def run_offline_batch(
 
     print(f"Running offline batch inference on {len(conversations)} prompts...")
     outputs = llm.chat(conversations, sampling_params=sampling_params)
-    return [output.outputs[0].text for output in outputs]
+    return [strip_thinking(output.outputs[0].text) for output in outputs]
 
 
 # ---------------------------------------------------------------------------

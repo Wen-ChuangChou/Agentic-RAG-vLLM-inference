@@ -70,6 +70,7 @@ export VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1        # Better KV cache sizin
 export NCCL_ASYNC_ERROR_HANDLING=1                       # Crash on NCCL hangs
 export TOKENIZERS_PARALLELISM=false                      # Suppress tokenizer warnings
 export TORCH_FLOAT32_MATMUL_PRECISION=high               # TF32 on H100s
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True  # Reduce GPU memory fragmentation
 
 # ==========================================================================
 # NVMe Model Staging
@@ -158,7 +159,7 @@ echo " Launching Python pipeline"
 echo "============================================================"
 echo ""
 
-python agentic_rag.py --config "${RAG_CONFIG}"
+python agentic_rag.py --config "${RAG_CONFIG}" --test
 EXIT_CODE=$?
 
 # ==========================================================================

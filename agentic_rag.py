@@ -10,13 +10,16 @@ Three-phase evaluation that maximises GPU utilisation on HPC:
 
 Usage:
     python agentic_rag.py --config recipes/GLM-4.7-Flash.yaml
+    python agentic_rag.py --config recipes/GLM-4.7-Flash.yaml --test 5
 """
 
 import argparse
 import asyncio
 import datasets
+import gc
 import os
 import pandas as pd
+import torch
 import yaml
 from dotenv import load_dotenv
 from pathlib import Path
@@ -60,6 +63,17 @@ def _resolve_model_path(config: dict) -> str:
     cfg_path = config.get("model", {}).get("model_path", "")
     model_id = config["model"]["model_id"]
     return env_path or cfg_path or model_id
+
+
+def _gpu_cleanup(label: str = "") -> None:
+    """Force GPU memory release between phases."""
+    import time
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+    time.sleep(5)
+    print(f"GPU memory cleaned up{' after ' + label if label else ''}.")
 
 
 # ===================================================================
@@ -266,9 +280,8 @@ def phase3_judge(config, all_outputs, evaluation_prompt, checkpoints_dir):
         model_id=judge_path,
         tensor_parallel_size=model_cfg.get("tensor_parallel_size", 2),
         gpu_memory_utilization=model_cfg.get("gpu_memory_utilization", 0.92),
-        max_model_len=eval_cfg.get(
-            "max_model_len", model_cfg.get("max_model_len", 131072)
-        ),
+        # Judge prompts are short (~2K tokens); no need for 131072 context
+        max_model_len=eval_cfg.get("max_model_len", 8192),
         trust_remote_code=model_cfg.get("trust_remote_code", True),
         dtype=model_cfg.get("dtype", "auto"),
     )
@@ -317,6 +330,15 @@ def main():
         default="recipes/GLM-4.7-Flash.yaml",
         help="Path to YAML configuration file",
     )
+    parser.add_argument(
+        "--test",
+        type=int,
+        nargs="?",
+        const=5,
+        default=None,
+        metavar="N",
+        help="Test mode: only process first N questions (default: 5)",
+    )
     args = parser.parse_args()
 
     with open(args.config, "r", encoding="utf-8") as f:
@@ -337,6 +359,8 @@ def main():
     print(f" Model:  {model_cfg['model_id']}")
     print(f" Judge:  {config.get('evaluation', {}).get('model_id', 'N/A')}")
     print(f" Config: {args.config}")
+    if args.test:
+        print(f" Mode:   TEST (first {args.test} questions only)")
     print("=" * 60 + "\n")
 
     # === Setup: vectordb + dataset ===
@@ -354,6 +378,13 @@ def main():
     eval_dataset = datasets.load_dataset(
         "m-ric/huggingface_doc_qa_eval", split="train"
     )
+
+    # --- Test mode: slice dataset to first N questions ---
+    if args.test:
+        n = min(args.test, len(eval_dataset))
+        eval_dataset = eval_dataset.select(range(n))
+        print(f"TEST MODE: using {n} of {len(eval_dataset)} questions\n")
+
     retriever_tool = RetrieverTool(vectordb)
 
     # Load prompts
@@ -372,12 +403,18 @@ def main():
         config, eval_dataset, retriever_tool, CHECKPOINTS_DIR
     )
 
+    # GPU cleanup between Phase 1 and Phase 2
+    _gpu_cleanup("Phase 1")
+
     # ==================================================================
     #  Phase 2 — Async Agentic RAG
     # ==================================================================
     agentic_results = phase2_agentic(
         config, eval_dataset, prompt_config, vectordb, CHECKPOINTS_DIR
     )
+
+    # GPU cleanup between Phase 2 and Phase 3
+    _gpu_cleanup("Phase 2")
 
     # ==================================================================
     #  Phase 3 — Offline Judge Evaluation
