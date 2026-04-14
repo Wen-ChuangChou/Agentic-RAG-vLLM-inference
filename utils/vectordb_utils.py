@@ -236,7 +236,8 @@ def load_or_create_vectordb(dataset_name: str,
                             text_chunk_size: int = 200,
                             text_chunk_overlap: int = 20,
                             force_rebuild: bool = False,
-                            use_parallel: bool = True) -> FAISS:
+                            use_parallel: bool = True,
+                            embedding_device: str = "cpu") -> FAISS:
     """
     Main entry point to get a FAISS vector database.
     Tries to load an existing database from disk, otherwise creates and saves a new one.
@@ -268,10 +269,10 @@ def load_or_create_vectordb(dataset_name: str,
 
         try:
             # Load the embedding model (needed for loading)
-            device = "cuda" if torch.cuda.is_available() else "cpu"
+            # Use specified device (defaults to cpu to avoid vLLM conflicts)
             embedding_model = HuggingFaceEmbeddings(
                 model_name="thenlper/gte-small",
-                model_kwargs={"device": device})
+                model_kwargs={"device": embedding_device})
 
             # Load the existing vectordb
             vectordb = FAISS.load_local(vectordb_path,
@@ -327,10 +328,9 @@ def load_or_create_vectordb(dataset_name: str,
     print(f"Final document count after deduplication: {len(docs_processed)}")
 
     # Create embedding model
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Using device: {device} to load embedding model...")
+    print(f"Using device: {embedding_device} to load embedding model...")
     embedding_model = HuggingFaceEmbeddings(model_name="thenlper/gte-small",
-                                            model_kwargs={"device": device})
+                                            model_kwargs={"device": embedding_device})
 
     # Create vectordb with batch processing
     vectordb = batch_embed_documents(docs_processed, embedding_model,

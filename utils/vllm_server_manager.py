@@ -42,8 +42,10 @@ class VLLMServerManager:
         extra_args: Optional[List[str]] = None,
         health_timeout: int = 600,
         health_poll_interval: int = 10,
+        served_model_name: Optional[str] = None,
     ):
         self.model_id = model_id
+        self.served_model_name = served_model_name or model_id
         self.port = port
         self.api_key = api_key
         self.tensor_parallel_size = tensor_parallel_size
@@ -70,7 +72,7 @@ class VLLMServerManager:
             sys.executable,
             "-m", "vllm.entrypoints.openai.api_server",
             "--model", self.model_id,
-            "--served-model-name", self.model_id,
+            "--served-model-name", self.served_model_name,
             "--port", str(self.port),
             "--api-key", self.api_key,
             "--host", self.host,
@@ -83,6 +85,9 @@ class VLLMServerManager:
             cmd.append("--trust-remote-code")
         if self.enable_prefix_caching:
             cmd.append("--enable-prefix-caching")
+            
+        cmd.append("--disable-custom-all-reduce")
+        
         cmd.extend(self.extra_args)
         return cmd
 

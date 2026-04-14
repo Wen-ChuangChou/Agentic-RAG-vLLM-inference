@@ -30,6 +30,7 @@ def create_offline_llm(
     max_model_len: int = 131072,
     trust_remote_code: bool = True,
     dtype: str = "auto",
+    disable_custom_all_reduce: bool = True,
 ) -> LLM:
     """Create a vLLM offline LLM instance for batch processing."""
     return LLM(
@@ -39,6 +40,7 @@ def create_offline_llm(
         max_model_len=max_model_len,
         trust_remote_code=trust_remote_code,
         dtype=dtype,
+        disable_custom_all_reduce=disable_custom_all_reduce,
     )
 
 

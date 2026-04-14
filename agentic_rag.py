@@ -41,10 +41,10 @@ from utils.vllm_server_manager import VLLMServerManager
 from utils.results_manager import save_evaluation_results
 from utils.vectordb_utils import load_or_create_vectordb
 
-
 # -----------------------------------------------------------------------
 # Helpers
 # -----------------------------------------------------------------------
+
 
 def fill_score(x, default_score):
     """Convert a string score to an integer, falling back on *default_score*."""
@@ -80,7 +80,9 @@ def _gpu_cleanup(label: str = "") -> None:
 #  Phase 1  —  Offline Batch (Standard RAG + Vanilla)
 # ===================================================================
 
-def phase1_offline_batch(config, eval_dataset, retriever_tool, checkpoints_dir):
+
+def phase1_offline_batch(config, eval_dataset, retriever_tool,
+                         checkpoints_dir):
     """
     Phase 1: Offline batch processing for Standard RAG + Vanilla LLM.
     Pre-retrieves all contexts on CPU, then runs a single
@@ -105,14 +107,10 @@ def phase1_offline_batch(config, eval_dataset, retriever_tool, checkpoints_dir):
     print("=" * 60)
 
     # 1a — Pre-retrieve contexts (CPU only, no GPU)
-    rag_convos = (
-        build_rag_prompts(eval_dataset, retriever_tool)
-        if cached_rag is None else None
-    )
-    vanilla_convos = (
-        build_vanilla_prompts(eval_dataset)
-        if cached_vanilla is None else None
-    )
+    rag_convos = (build_rag_prompts(eval_dataset, retriever_tool)
+                  if cached_rag is None else None)
+    vanilla_convos = (build_vanilla_prompts(eval_dataset)
+                      if cached_vanilla is None else None)
 
     # 1b — Load model offline
     print(f"\nLoading model for offline inference: {model_id}")
@@ -135,15 +133,12 @@ def phase1_offline_batch(config, eval_dataset, retriever_tool, checkpoints_dir):
     if rag_results is None:
         print("\n--- Standard RAG batch inference ---")
         rag_answers = run_offline_batch(llm, rag_convos, sampling)
-        rag_results = [
-            {
-                "question": eval_dataset[i]["question"],
-                "true_answer": eval_dataset[i]["answer"],
-                "source_doc": eval_dataset[i]["source_doc"],
-                "generated_answer": str(a),
-            }
-            for i, a in enumerate(rag_answers)
-        ]
+        rag_results = [{
+            "question": eval_dataset[i]["question"],
+            "true_answer": eval_dataset[i]["answer"],
+            "source_doc": eval_dataset[i]["source_doc"],
+            "generated_answer": str(a),
+        } for i, a in enumerate(rag_answers)]
         save_phase_results(rag_results, rag_ckpt, "standard_rag")
 
     # 1d — Vanilla batch
@@ -151,15 +146,12 @@ def phase1_offline_batch(config, eval_dataset, retriever_tool, checkpoints_dir):
     if vanilla_results is None:
         print("\n--- Vanilla LLM batch inference ---")
         vanilla_answers = run_offline_batch(llm, vanilla_convos, sampling)
-        vanilla_results = [
-            {
-                "question": eval_dataset[i]["question"],
-                "true_answer": eval_dataset[i]["answer"],
-                "source_doc": eval_dataset[i]["source_doc"],
-                "generated_answer": str(a),
-            }
-            for i, a in enumerate(vanilla_answers)
-        ]
+        vanilla_results = [{
+            "question": eval_dataset[i]["question"],
+            "true_answer": eval_dataset[i]["answer"],
+            "source_doc": eval_dataset[i]["source_doc"],
+            "generated_answer": str(a),
+        } for i, a in enumerate(vanilla_answers)]
         save_phase_results(vanilla_results, vanilla_ckpt, "standard")
 
     # 1e — Release GPU
@@ -174,6 +166,7 @@ def phase1_offline_batch(config, eval_dataset, retriever_tool, checkpoints_dir):
 # ===================================================================
 #  Phase 2  —  Async Agentic RAG
 # ===================================================================
+
 
 def phase2_agentic(config, eval_dataset, prompt_config, vectordb,
                    checkpoints_dir):
@@ -198,16 +191,18 @@ def phase2_agentic(config, eval_dataset, prompt_config, vectordb,
     api_key = server_cfg.get("api_key", "ai4all")
 
     with VLLMServerManager(
-        model_id=model_id,
-        port=port,
-        api_key=api_key,
-        tensor_parallel_size=model_cfg.get("tensor_parallel_size", 2),
-        gpu_memory_utilization=model_cfg.get("gpu_memory_utilization", 0.92),
-        max_model_len=model_cfg.get("max_model_len", 131072),
-        dtype=model_cfg.get("dtype", "auto"),
-        trust_remote_code=model_cfg.get("trust_remote_code", True),
-        enable_prefix_caching=True,
-        extra_args=server_cfg.get("extra_args", []),
+            model_id=model_id,
+            served_model_name=model_cfg["model_id"],
+            port=port,
+            api_key=api_key,
+            tensor_parallel_size=model_cfg.get("tensor_parallel_size", 2),
+            gpu_memory_utilization=model_cfg.get("gpu_memory_utilization",
+                                                 0.92),
+            max_model_len=model_cfg.get("max_model_len", 131072),
+            dtype=model_cfg.get("dtype", "auto"),
+            trust_remote_code=model_cfg.get("trust_remote_code", True),
+            enable_prefix_caching=True,
+            extra_args=server_cfg.get("extra_args", []),
     ) as server:
         agent_model_config = {
             "model_id": model_cfg["model_id"],  # served-model-name
@@ -229,8 +224,7 @@ def phase2_agentic(config, eval_dataset, prompt_config, vectordb,
                 concurrency=concurrency,
                 checkpoint_file=agentic_ckpt,
                 checkpoint_interval=ckpt_interval,
-            )
-        )
+            ))
 
     # Server is automatically stopped by the context manager
     print(f"\nPhase 2 complete: {len(agentic_results)} agentic results")
@@ -240,6 +234,7 @@ def phase2_agentic(config, eval_dataset, prompt_config, vectordb,
 # ===================================================================
 #  Phase 3  —  Offline Judge Evaluation
 # ===================================================================
+
 
 def phase3_judge(config, all_outputs, evaluation_prompt, checkpoints_dir):
     """
@@ -263,18 +258,14 @@ def phase3_judge(config, all_outputs, evaluation_prompt, checkpoints_dir):
     print("=" * 60)
 
     # Build prompts
-    judge_convos, judge_meta = build_judge_prompts(
-        all_outputs, evaluation_prompt
-    )
+    judge_convos, judge_meta = build_judge_prompts(all_outputs,
+                                                   evaluation_prompt)
     print(f"Judge model:   {judge_model_id}")
     print(f"Total prompts: {len(judge_convos)}")
 
     # Resolve judge model path
-    judge_path = (
-        os.environ.get("VLLM_JUDGE_MODEL_PATH", "")
-        or eval_cfg.get("model_path", "")
-        or judge_model_id
-    )
+    judge_path = (os.environ.get("VLLM_JUDGE_MODEL_PATH", "")
+                  or eval_cfg.get("model_path", "") or judge_model_id)
 
     llm = create_offline_llm(
         model_id=judge_path,
@@ -298,9 +289,7 @@ def phase3_judge(config, all_outputs, evaluation_prompt, checkpoints_dir):
     judge_results = []
     for answer, meta in zip(judge_answers, judge_meta):
         try:
-            feedback, score = [
-                s.strip() for s in answer.split("[RESULT]")
-            ]
+            feedback, score = [s.strip() for s in answer.split("[RESULT]")]
         except ValueError:
             feedback, score = answer, None
         judge_results.append({
@@ -319,12 +308,12 @@ def phase3_judge(config, all_outputs, evaluation_prompt, checkpoints_dir):
 #  Main
 # ===================================================================
 
+
 def main():
     load_dotenv()
 
     parser = argparse.ArgumentParser(
-        description="Hybrid Agentic RAG evaluation pipeline"
-    )
+        description="Hybrid Agentic RAG evaluation pipeline")
     parser.add_argument(
         "--config",
         default="recipes/GLM-4.7-Flash.yaml",
@@ -338,6 +327,12 @@ def main():
         default=None,
         metavar="N",
         help="Test mode: only process first N questions (default: 5)",
+    )
+    parser.add_argument(
+        "--embedding-device",
+        default="cuda",
+        choices=["cpu", "cuda"],
+        help="Device to use for embedding model (default: cuda)",
     )
     args = parser.parse_args()
 
@@ -374,10 +369,11 @@ def main():
         "force_rebuild": vdb_cfg.get("force_rebuild", False),
         "use_parallel": vdb_cfg.get("use_parallel", True),
     }
-    vectordb = load_or_create_vectordb(dataset_name, **vectordb_config)
-    eval_dataset = datasets.load_dataset(
-        "m-ric/huggingface_doc_qa_eval", split="train"
-    )
+    vectordb = load_or_create_vectordb(dataset_name,
+                                       embedding_device=args.embedding_device,
+                                       **vectordb_config)
+    eval_dataset = datasets.load_dataset("m-ric/huggingface_doc_qa_eval",
+                                         split="train")
 
     # --- Test mode: slice dataset to first N questions ---
     if args.test:
@@ -400,8 +396,7 @@ def main():
     #  Phase 1 — Offline Batch (Standard RAG + Vanilla)
     # ==================================================================
     rag_results, vanilla_results = phase1_offline_batch(
-        config, eval_dataset, retriever_tool, CHECKPOINTS_DIR
-    )
+        config, eval_dataset, retriever_tool, CHECKPOINTS_DIR)
 
     # GPU cleanup between Phase 1 and Phase 2
     _gpu_cleanup("Phase 1")
@@ -409,9 +404,8 @@ def main():
     # ==================================================================
     #  Phase 2 — Async Agentic RAG
     # ==================================================================
-    agentic_results = phase2_agentic(
-        config, eval_dataset, prompt_config, vectordb, CHECKPOINTS_DIR
-    )
+    agentic_results = phase2_agentic(config, eval_dataset, prompt_config,
+                                     vectordb, CHECKPOINTS_DIR)
 
     # GPU cleanup between Phase 2 and Phase 3
     _gpu_cleanup("Phase 2")
@@ -425,9 +419,8 @@ def main():
         "standard": vanilla_results,
     }
 
-    judge_results = phase3_judge(
-        config, all_outputs, evaluation_prompt["prompt"], CHECKPOINTS_DIR
-    )
+    judge_results = phase3_judge(config, all_outputs,
+                                 evaluation_prompt["prompt"], CHECKPOINTS_DIR)
 
     # ==================================================================
     #  Scoring & Results
@@ -446,11 +439,9 @@ def main():
         idx = jr["idx"]
         if idx < len(evaluated[sys_type]):
             evaluated[sys_type][idx]["eval_score_LLM_judge"] = (
-                jr["eval_score_LLM_judge"]
-            )
+                jr["eval_score_LLM_judge"])
             evaluated[sys_type][idx]["eval_feedback_LLM_judge"] = (
-                jr["eval_feedback_LLM_judge"]
-            )
+                jr["eval_feedback_LLM_judge"])
 
     # Calculate scores
     results = {}
@@ -459,14 +450,10 @@ def main():
         df = pd.DataFrame.from_dict(evaluated[sys_type])
         df = df.loc[~df["generated_answer"].str.contains("Error", na=False)]
 
-        df["eval_score_LLM_judge_int"] = (
-            df["eval_score_LLM_judge"]
-            .fillna(DEFAULT_SCORE)
-            .apply(lambda x: fill_score(x, DEFAULT_SCORE))
-        )
-        df["eval_score_LLM_judge_int"] = (
-            df["eval_score_LLM_judge_int"] - 1
-        ) / 2
+        df["eval_score_LLM_judge_int"] = (df["eval_score_LLM_judge"].fillna(
+            DEFAULT_SCORE).apply(lambda x: fill_score(x, DEFAULT_SCORE)).astype(float))
+        df["eval_score_LLM_judge_int"] = (df["eval_score_LLM_judge_int"] -
+                                          1) / 2
 
         avg = df["eval_score_LLM_judge_int"].mean() * 100
         print(f"  {sys_type:20s} → {avg:.1f}%")
@@ -486,10 +473,8 @@ def main():
         "eval_model_name": eval_model_name,
         "eval_model_id": eval_cfg.get("model_id", "unknown"),
     }
-    filename = (
-        f"{model_name}_vect{vectordb_config['text_chunk_size']}"
-        f"_t{TEMPERATURE}.json"
-    )
+    filename = (f"{model_name}_vect{vectordb_config['text_chunk_size']}"
+                f"_t{TEMPERATURE}.json")
     save_evaluation_results(meta_data, results, RESULTS_DIR, filename)
 
 
