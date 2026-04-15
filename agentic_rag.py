@@ -121,6 +121,7 @@ def phase1_offline_batch(config, eval_dataset, retriever_tool,
         max_model_len=model_cfg.get("max_model_len", 131072),
         trust_remote_code=model_cfg.get("trust_remote_code", True),
         dtype=model_cfg.get("dtype", "auto"),
+        enforce_eager=model_cfg.get("enforce_eager", False),
     )
 
     sampling = SamplingParams(
@@ -275,6 +276,7 @@ def phase3_judge(config, all_outputs, evaluation_prompt, checkpoints_dir):
         max_model_len=eval_cfg.get("max_model_len", 8192),
         trust_remote_code=model_cfg.get("trust_remote_code", True),
         dtype=model_cfg.get("dtype", "auto"),
+        enforce_eager=eval_cfg.get("enforce_eager", model_cfg.get("enforce_eager", False)),
     )
 
     sampling = SamplingParams(

@@ -17,13 +17,14 @@ model:
   trust_remote_code: true
   temperature: 0.2
   max_tokens: 16384
+  enforce_eager: true                       # Workaround for Hopper TMA descriptor crash
 
 # === vLLM server settings (Phase 2 only) ===
 server:
   port: 8000
   api_key: "ai4all"
   host: "0.0.0.0"
-  extra_args: []                            # e.g., ["--speculative-config.method", "mtp"]
+  extra_args: ["--enforce-eager"]        # Workaround for Hopper TMA descriptor crash in FlashAttention MLA
 
 # === Evaluation judge model (Phase 3) ===
 evaluation:
@@ -35,7 +36,7 @@ evaluation:
 
 # === Async agentic settings (Phase 2) ===
 async:
-  concurrency: 1                           # Number of concurrent agentic queries
+  concurrency: 10                          # Number of concurrent agentic queries
   checkpoint_interval: 5                    # Save checkpoint every N completions
 
 # === Vector DB config ===
