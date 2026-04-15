@@ -375,14 +375,16 @@ def run_evaluation_with_checkpoint(
                                                       max_retries)
 
                     if eval_result:
-                        try:
-                            feedback, score = [
-                                item.strip()
-                                for item in eval_result.split("[RESULT]")
-                            ]
+                        # Use rsplit to split on the LAST "[RESULT]"
+                        # occurrence, in case leaked chain-of-thought
+                        # reasoning contains earlier mentions.
+                        parts = eval_result.rsplit("[RESULT]", 1)
+                        if len(parts) == 2:
+                            feedback = parts[0].strip()
+                            score = parts[1].strip()
                             experiment["eval_score_LLM_judge"] = score
                             experiment["eval_feedback_LLM_judge"] = feedback
-                        except ValueError:
+                        else:
                             print(f"\nParsing failed: {eval_result}")
                             experiment["eval_score_LLM_judge"] = None
                             experiment["eval_feedback_LLM_judge"] = None

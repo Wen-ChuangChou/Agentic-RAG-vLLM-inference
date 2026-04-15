@@ -61,16 +61,29 @@ def release_offline_llm(llm: LLM) -> None:
 
 def strip_thinking(text: str) -> str:
     """
-    Remove ``<think>...</think>`` reasoning blocks from model output.
+    Remove reasoning / chain-of-thought blocks from model output.
 
-    Reasoning models like GLM-4.7-Flash wrap their chain-of-thought in
-    ``<think>`` tags.  For evaluation we only want the final answer.
+    Handles two formats:
+    1. ``<think>...</think>`` tags (e.g. GLM-4.7-Flash, Qwen3).
+    2. Inline reasoning prefixed before ``Feedback:`` (e.g. GPT-OSS-120b
+       which emits ``analysis...assistantfinalFeedback: ...``).
+
+    For evaluation we only want the final answer.
     """
-    # If there's a closing </think> tag, take everything after it
+    # 1) Handle <think>...</think> tags
     if "</think>" in text:
         text = text.split("</think>", 1)[1]
     # Also strip any remaining opening tags (edge case: no closing tag)
     text = re.sub(r"<think>.*", "", text, flags=re.DOTALL)
+
+    # 2) Handle inline reasoning (e.g. "analysis...assistantfinalFeedback:")
+    #    The evaluation prompt asks the judge to start output with "Feedback:".
+    #    If "Feedback:" appears, take from the *last* occurrence so we get the
+    #    clean final output and discard any leaked chain-of-thought.
+    if "Feedback:" in text:
+        idx = text.rfind("Feedback:")
+        text = text[idx:]
+
     return text.strip()
 
 

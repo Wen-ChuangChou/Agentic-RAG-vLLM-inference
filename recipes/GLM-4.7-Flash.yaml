@@ -47,3 +47,9 @@ vectordb:
   text_chunk_overlap: 40
   force_rebuild: false
   use_parallel: true
+
+## === Prompt config ===
+prompt:
+  agent_prompt_filename: "gemini_agent_system_prompt.yaml" #Prompt of Agentic RAG
+  judge_prompt_filename: "evaluation_prompt.yaml" #Prompt of Judge LLM
+  

@@ -2,12 +2,8 @@ name: evaluation_prompt
 date: "2025-06-21"
 version: 1.0
 description: >
-  System prompt for the agentic RAG system to retrieve and extract precise answers from the vector database.
-  Focuses on succinctness and verbatim extraction.
+  System prompt for an LLM evaluator to assess model responses against a reference answer using a defined scoring rubric.
 
-  Why this should work better:
-  - Agent writes paragraphs of explanation -> Fix: "Give ONLY the final answer in as few words as possible. No explanation, no reasoning, no quoting, no context."
-  - Agent shortens 'x86_64-unknown-linux-musl' to 'X86_64' -> Fix: "Extract the most precise and complete answer span from the document. Do not truncate or shorten the key term."
 prompt: >
   You are a fair evaluator language model.
 

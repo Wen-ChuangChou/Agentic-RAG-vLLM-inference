@@ -39,7 +39,7 @@ def _create_agent(model_config: dict, vectordb) -> CodeAgent:
         model=llm,
         planning_interval=5,
         max_steps=30,
-        verbosity_level=LogLevel.ERROR,
+        verbosity_level=LogLevel.INFO,
     )
     return agent
 
@@ -62,9 +62,8 @@ class AsyncAgenticRunner:
         self.prompt_config = prompt_config
         self.vectordb = vectordb
         self.concurrency = concurrency
-        self.checkpoint_file = (
-            Path(checkpoint_file) if checkpoint_file else None
-        )
+        self.checkpoint_file = (Path(checkpoint_file)
+                                if checkpoint_file else None)
         self.checkpoint_interval = checkpoint_interval
 
         # Thread-safe state
@@ -88,10 +87,8 @@ class AsyncAgenticRunner:
             for str_idx, result in results.items():
                 self._results[int(str_idx)] = result
             completed = set(int(k) for k in results.keys())
-            print(
-                f"Resumed agentic checkpoint: "
-                f"{len(completed)}/{len(self.eval_dataset)} done"
-            )
+            print(f"Resumed agentic checkpoint: "
+                  f"{len(completed)}/{len(self.eval_dataset)} done")
             return completed
         except (json.JSONDecodeError, IOError) as e:
             print(f"Warning: Error loading agentic checkpoint: {e}")
@@ -103,7 +100,10 @@ class AsyncAgenticRunner:
             return
         with self._lock:
             data = {
-                "results": {str(k): v for k, v in self._results.items()},
+                "results": {
+                    str(k): v
+                    for k, v in self._results.items()
+                },
                 "completed": len(self._results),
                 "total": len(self.eval_dataset),
                 "timestamp": datetime.now().isoformat(),
@@ -135,9 +135,8 @@ class AsyncAgenticRunner:
     # Core async logic
     # ------------------------------------------------------------------
 
-    async def _process_question(
-        self, idx: int, semaphore: asyncio.Semaphore
-    ) -> None:
+    async def _process_question(self, idx: int,
+                                semaphore: asyncio.Semaphore) -> None:
         """Process a single question with an agent (runs in a thread)."""
         async with semaphore:
             example = self.eval_dataset[idx]
@@ -177,10 +176,8 @@ class AsyncAgenticRunner:
             print("All agentic queries already completed!")
             return self._get_ordered_results()
 
-        print(
-            f"Running {len(remaining)} agentic queries "
-            f"(concurrency={self.concurrency})..."
-        )
+        print(f"Running {len(remaining)} agentic queries "
+              f"(concurrency={self.concurrency})...")
 
         semaphore = asyncio.Semaphore(self.concurrency)
         self._pbar = tqdm(
@@ -189,9 +186,7 @@ class AsyncAgenticRunner:
             desc="Agentic RAG",
         )
 
-        tasks = [
-            self._process_question(idx, semaphore) for idx in remaining
-        ]
+        tasks = [self._process_question(idx, semaphore) for idx in remaining]
         await asyncio.gather(*tasks)
 
         self._pbar.close()
@@ -206,6 +201,7 @@ class AsyncAgenticRunner:
 # ---------------------------------------------------------------------------
 # Public convenience function
 # ---------------------------------------------------------------------------
+
 
 async def run_agentic_batch(
     eval_dataset,

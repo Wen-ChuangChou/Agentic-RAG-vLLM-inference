@@ -288,9 +288,12 @@ def phase3_judge(config, all_outputs, evaluation_prompt, checkpoints_dir):
     # Parse "[RESULT]" formatted responses
     judge_results = []
     for answer, meta in zip(judge_answers, judge_meta):
-        try:
-            feedback, score = [s.strip() for s in answer.split("[RESULT]")]
-        except ValueError:
+        # Use rsplit to split on the LAST "[RESULT]" occurrence, in case
+        # leaked chain-of-thought reasoning contains earlier mentions.
+        parts = answer.rsplit("[RESULT]", 1)
+        if len(parts) == 2:
+            feedback, score = parts[0].strip(), parts[1].strip()
+        else:
             feedback, score = answer, None
         judge_results.append({
             "system_type": meta["system_type"],
@@ -384,11 +387,12 @@ def main():
     retriever_tool = RetrieverTool(vectordb)
 
     # Load prompts
-    prompt_path = Path("prompts") / "guide_agent_system_prompt.yaml"
+    prompt_path = Path("prompts") / config["prompt"]["agent_prompt_filename"]
     with open(prompt_path, "r", encoding="utf-8") as f:
         prompt_config = yaml.safe_load(f)
 
-    eval_prompt_path = Path("prompts") / "evaluation_prompt.yaml"
+    eval_prompt_path = Path(
+        "prompts") / config["prompt"]["judge_prompt_filename"]
     with open(eval_prompt_path, "r", encoding="utf-8") as f:
         evaluation_prompt = yaml.safe_load(f)
 
@@ -450,8 +454,9 @@ def main():
         df = pd.DataFrame.from_dict(evaluated[sys_type])
         df = df.loc[~df["generated_answer"].str.contains("Error", na=False)]
 
-        df["eval_score_LLM_judge_int"] = (df["eval_score_LLM_judge"].fillna(
-            DEFAULT_SCORE).apply(lambda x: fill_score(x, DEFAULT_SCORE)).astype(float))
+        df["eval_score_LLM_judge_int"] = (
+            df["eval_score_LLM_judge"].fillna(DEFAULT_SCORE).apply(
+                lambda x: fill_score(x, DEFAULT_SCORE)).astype(float))
         df["eval_score_LLM_judge_int"] = (df["eval_score_LLM_judge_int"] -
                                           1) / 2
 
@@ -469,7 +474,7 @@ def main():
     meta_data = {
         "model_name": model_name,
         "model_id": model_cfg["model_id"],
-        "prompt_filename": "guide_agent_system_prompt.yaml",
+        "prompt_filename": config["prompt"]["agent_prompt_filename"],
         "eval_model_name": eval_model_name,
         "eval_model_id": eval_cfg.get("model_id", "unknown"),
     }

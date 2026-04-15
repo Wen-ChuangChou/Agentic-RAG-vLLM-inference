@@ -26,6 +26,7 @@
 #SBATCH --mail-user=wen-chuang.chou@tu-dresden.de
 #SBATCH --mail-type=ALL
 #SBATCH --licenses=cat
+#SBATCH --exlusive
 
 # ==========================================================================
 # Configuration (override via environment variables)
@@ -42,7 +43,7 @@ fi
 # This will be done in the Environment setup section after loading python!
 
 # NVMe local staging — enabled by default for faster model loading
-USE_NVME="${VLLM_USE_NVME:-true}"
+USE_NVME="${VLLM_USE_NVME:-false}"
 NVME_MOUNT="/tmp"
 
 # ==========================================================================
