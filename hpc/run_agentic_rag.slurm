@@ -20,13 +20,12 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=2
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=256G
-#SBATCH --time=00:30:00
+#SBATCH --mem=128G
+#SBATCH --time=04:00:00
 #SBATCH --partition=capella
 #SBATCH --mail-user=wen-chuang.chou@tu-dresden.de
 #SBATCH --mail-type=ALL
 #SBATCH --licenses=cat
-#SBATCH --exlusive
 
 # ==========================================================================
 # Configuration (override via environment variables)
@@ -177,8 +176,30 @@ srun python agentic_rag.py --config "${RAG_CONFIG}" "$@"
 EXIT_CODE=$?
 
 # ==========================================================================
-# Timing report
+# Cleanup & Timing report
 # ==========================================================================
+
+echo ""
+echo "--- Cleanup ---"
+# Clean up NVMe staged models and logs if they exist in /tmp
+if [ -d "${NVME_MOUNT}/vllm_models" ]; then
+    echo "Removing staged models from NVMe SSD (${NVME_MOUNT}/vllm_models) ..."
+    rm -rf "${NVME_MOUNT}/vllm_models"
+fi
+
+if [ -f "${NVME_MOUNT}/vllm_server.out" ] || [ -f "${NVME_MOUNT}/vllm_server.err" ]; then
+    echo "Removing vLLM server logs from NVMe SSD (${NVME_MOUNT}) ..."
+    rm -f "${NVME_MOUNT}/vllm_server.out" "${NVME_MOUNT}/vllm_server.err"
+fi
+
+# Also clean up the local tmp directory used for logs by default in the python code
+if [ -d "tmp" ]; then
+    echo "Removing local tmp/ directory ..."
+    rm -rf tmp
+fi
+echo "Cleanup complete."
+echo ""
+
 END_TIME=$(date +%s)
 ELAPSED=$((END_TIME - START_TIME))
 HOURS=$((ELAPSED / 3600))
