@@ -10,13 +10,13 @@
 model:
   model_id: "zai-org/GLM-4.7-Flash"
   model_path: ""                            # Set by VLLM_MODEL_PATH env var or NVMe staging
-  tensor_parallel_size: 2
+  tensor_parallel_size: 4
   gpu_memory_utilization: 0.92
   max_model_len: 16384
   dtype: "auto"
   trust_remote_code: true
   temperature: 0.2
-  max_tokens: 8192
+  max_tokens: 4096
   enforce_eager: false                       # Workaround for Hopper TMA descriptor crash
 
 # === vLLM server settings (Phase 2 only) ===
@@ -24,7 +24,8 @@ server:
   port: 8000
   api_key: "ai4all"
   host: "0.0.0.0"
-  extra_args: ["--enforce-eager"]        # Workaround for Hopper TMA descriptor crash in FlashAttention MLA
+  extra_args: []
+  # extra_args: ["--enforce-eager"]        # Workaround for Hopper TMA descriptor crash in FlashAttention MLA
 
 # === Evaluation judge model (Phase 3) ===
 evaluation:

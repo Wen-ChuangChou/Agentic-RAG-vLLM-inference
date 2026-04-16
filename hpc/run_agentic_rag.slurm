@@ -18,7 +18,7 @@
 #SBATCH --error=logs/agentic-rag-%x-%j.err
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --gpus-per-node=2
+#SBATCH --gpus-per-node=4
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=128G
 #SBATCH --time=00:30:00

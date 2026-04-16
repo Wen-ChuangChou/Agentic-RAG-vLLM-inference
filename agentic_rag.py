@@ -18,6 +18,7 @@ import asyncio
 import datasets
 import gc
 import os
+import time
 import pandas as pd
 import torch
 import yaml
@@ -87,6 +88,9 @@ def phase1_offline_batch(config, eval_dataset, retriever_tool,
     Phase 1: Offline batch processing for Standard RAG + Vanilla LLM.
     Pre-retrieves all contexts on CPU, then runs a single
     ``vllm.LLM.chat()`` call for maximum throughput.
+
+    Returns:
+        (rag_results, vanilla_results, timing_dict)
     """
     model_cfg = config["model"]
     model_id = _resolve_model_path(config)
@@ -100,7 +104,7 @@ def phase1_offline_batch(config, eval_dataset, retriever_tool,
 
     if cached_rag is not None and cached_vanilla is not None:
         print("Phase 1: Using cached results (both RAG and vanilla).")
-        return cached_rag, cached_vanilla
+        return cached_rag, cached_vanilla, {"cached": True}
 
     print("\n" + "=" * 60)
     print(" Phase 1: Offline Batch (Standard RAG + Vanilla)")
@@ -114,6 +118,7 @@ def phase1_offline_batch(config, eval_dataset, retriever_tool,
 
     # 1b — Load model offline
     print(f"\nLoading model for offline inference: {model_id}")
+    t_load = time.time()
     llm = create_offline_llm(
         model_id=model_id,
         tensor_parallel_size=model_cfg.get("tensor_parallel_size", 2),
@@ -123,6 +128,8 @@ def phase1_offline_batch(config, eval_dataset, retriever_tool,
         dtype=model_cfg.get("dtype", "auto"),
         enforce_eager=model_cfg.get("enforce_eager", False),
     )
+    t_load = time.time() - t_load
+    print(f"Model loaded in {t_load:.1f}s")
 
     sampling = SamplingParams(
         temperature=model_cfg.get("temperature", 0.2),
@@ -130,10 +137,14 @@ def phase1_offline_batch(config, eval_dataset, retriever_tool,
     )
 
     # 1c — Standard RAG batch
+    t_rag = 0.0
     rag_results = cached_rag
     if rag_results is None:
         print("\n--- Standard RAG batch inference ---")
+        t0 = time.time()
         rag_answers = run_offline_batch(llm, rag_convos, sampling)
+        t_rag = time.time() - t0
+        print(f"Standard RAG batch completed in {t_rag:.1f}s")
         rag_results = [{
             "question": eval_dataset[i]["question"],
             "true_answer": eval_dataset[i]["answer"],
@@ -143,10 +154,14 @@ def phase1_offline_batch(config, eval_dataset, retriever_tool,
         save_phase_results(rag_results, rag_ckpt, "standard_rag")
 
     # 1d — Vanilla batch
+    t_vanilla = 0.0
     vanilla_results = cached_vanilla
     if vanilla_results is None:
         print("\n--- Vanilla LLM batch inference ---")
+        t0 = time.time()
         vanilla_answers = run_offline_batch(llm, vanilla_convos, sampling)
+        t_vanilla = time.time() - t0
+        print(f"Vanilla batch completed in {t_vanilla:.1f}s")
         vanilla_results = [{
             "question": eval_dataset[i]["question"],
             "true_answer": eval_dataset[i]["answer"],
@@ -159,9 +174,15 @@ def phase1_offline_batch(config, eval_dataset, retriever_tool,
     print("\nReleasing GPU memory after Phase 1 ...")
     release_offline_llm(llm)
 
+    timing = {
+        "model_load_seconds": round(t_load, 2),
+        "rag_batch_seconds": round(t_rag, 2),
+        "vanilla_batch_seconds": round(t_vanilla, 2),
+    }
+
     print(f"\nPhase 1 complete: "
           f"{len(rag_results)} RAG + {len(vanilla_results)} vanilla")
-    return rag_results, vanilla_results
+    return rag_results, vanilla_results, timing
 
 
 # ===================================================================
@@ -175,6 +196,9 @@ def phase2_agentic(config, eval_dataset, prompt_config, vectordb,
     Phase 2: Concurrent Agentic RAG via vLLM server + asyncio.
     Starts vLLM server as a subprocess, runs N agents in parallel,
     then stops the server.
+
+    Returns:
+        (agentic_results, timing_dict)
     """
     model_cfg = config["model"]
     server_cfg = config.get("server", {})
@@ -191,6 +215,7 @@ def phase2_agentic(config, eval_dataset, prompt_config, vectordb,
     port = server_cfg.get("port", 8000)
     api_key = server_cfg.get("api_key", "ai4all")
 
+    t_server_start = time.time()
     with VLLMServerManager(
             model_id=model_id,
             served_model_name=model_cfg["model_id"],
@@ -205,6 +230,9 @@ def phase2_agentic(config, eval_dataset, prompt_config, vectordb,
             enable_prefix_caching=True,
             extra_args=server_cfg.get("extra_args", []),
     ) as server:
+        t_server_ready = time.time() - t_server_start
+        print(f"vLLM server ready in {t_server_ready:.1f}s")
+
         agent_model_config = {
             "model_id": model_cfg["model_id"],  # served-model-name
             "api_base": server.url,
@@ -216,6 +244,7 @@ def phase2_agentic(config, eval_dataset, prompt_config, vectordb,
         concurrency = async_cfg.get("concurrency", 16)
         ckpt_interval = async_cfg.get("checkpoint_interval", 5)
 
+        t_agentic = time.time()
         agentic_results = asyncio.run(
             run_agentic_batch(
                 eval_dataset=eval_dataset,
@@ -226,10 +255,17 @@ def phase2_agentic(config, eval_dataset, prompt_config, vectordb,
                 checkpoint_file=agentic_ckpt,
                 checkpoint_interval=ckpt_interval,
             ))
+        t_agentic = time.time() - t_agentic
+        print(f"Agentic batch completed in {t_agentic:.1f}s")
 
     # Server is automatically stopped by the context manager
+    timing = {
+        "server_startup_seconds": round(t_server_ready, 2),
+        "agentic_batch_seconds": round(t_agentic, 2),
+    }
+
     print(f"\nPhase 2 complete: {len(agentic_results)} agentic results")
-    return agentic_results
+    return agentic_results, timing
 
 
 # ===================================================================
@@ -401,7 +437,7 @@ def main():
     # ==================================================================
     #  Phase 1 — Offline Batch (Standard RAG + Vanilla)
     # ==================================================================
-    rag_results, vanilla_results = phase1_offline_batch(
+    rag_results, vanilla_results, phase1_timing = phase1_offline_batch(
         config, eval_dataset, retriever_tool, CHECKPOINTS_DIR)
 
     # GPU cleanup between Phase 1 and Phase 2
@@ -410,8 +446,8 @@ def main():
     # ==================================================================
     #  Phase 2 — Async Agentic RAG
     # ==================================================================
-    agentic_results = phase2_agentic(config, eval_dataset, prompt_config,
-                                     vectordb, CHECKPOINTS_DIR)
+    agentic_results, phase2_timing = phase2_agentic(
+        config, eval_dataset, prompt_config, vectordb, CHECKPOINTS_DIR)
 
     # GPU cleanup between Phase 2 and Phase 3
     _gpu_cleanup("Phase 2")
@@ -425,8 +461,10 @@ def main():
         "standard": vanilla_results,
     }
 
+    t_phase3_start = time.time()
     judge_results = phase3_judge(config, all_outputs,
                                  evaluation_prompt["prompt"], CHECKPOINTS_DIR)
+    t_phase3_end = time.time()
 
     # ==================================================================
     #  Scoring & Results
@@ -470,8 +508,55 @@ def main():
 
     # Persist
     eval_cfg = config.get("evaluation", {})
+    server_cfg = config.get("server", {})
+    async_cfg = config.get("async", {})
     eval_model_name = eval_cfg.get("model_id", "unknown").split("/")[-1]
     TEMPERATURE = model_cfg.get("temperature", 0.2)
+
+    # Timing results
+    t_phase3 = round(t_phase3_end - t_phase3_start, 2)
+    timing = {
+        "phase1": phase1_timing,
+        "phase2": phase2_timing,
+        "phase3_judge_seconds": t_phase3,
+    }
+
+    # Compute total (handle cached Phase 1 gracefully)
+    p1_total = (phase1_timing.get("model_load_seconds", 0)
+                + phase1_timing.get("rag_batch_seconds", 0)
+                + phase1_timing.get("vanilla_batch_seconds", 0))
+    p2_total = (phase2_timing.get("server_startup_seconds", 0)
+                + phase2_timing.get("agentic_batch_seconds", 0))
+    timing["total_seconds"] = round(p1_total + p2_total + t_phase3, 2)
+
+    # vLLM configuration snapshot — record actual config values, no defaults
+    vllm_config = {
+        "offline": {
+            "model_id": model_cfg["model_id"],
+            "tensor_parallel_size": model_cfg.get("tensor_parallel_size"),
+            "gpu_memory_utilization": model_cfg.get(
+                "gpu_memory_utilization"),
+            "max_model_len": model_cfg.get("max_model_len"),
+            "dtype": model_cfg.get("dtype"),
+            "enforce_eager": model_cfg.get("enforce_eager"),
+            "temperature": model_cfg.get("temperature"),
+            "max_tokens": model_cfg.get("max_tokens"),
+        },
+        "server": {
+            "port": server_cfg.get("port"),
+            "extra_args": server_cfg.get("extra_args"),
+        },
+        "async": {
+            "concurrency": async_cfg.get("concurrency"),
+            "checkpoint_interval": async_cfg.get("checkpoint_interval"),
+        },
+        "judge": {
+            "model_id": eval_cfg.get("model_id"),
+            "max_model_len": eval_cfg.get("max_model_len"),
+            "temperature": eval_cfg.get("temperature"),
+            "max_tokens": eval_cfg.get("max_tokens"),
+        },
+    }
 
     meta_data = {
         "model_name": model_name,
@@ -479,7 +564,27 @@ def main():
         "prompt_filename": config["prompt"]["agent_prompt_filename"],
         "eval_model_name": eval_model_name,
         "eval_model_id": eval_cfg.get("model_id", "unknown"),
+        "timing": timing,
+        "vllm_config": vllm_config,
+        "num_questions": len(eval_dataset),
     }
+
+    # Print timing summary
+    print("\n" + "-" * 50)
+    print(" Timing Summary")
+    print("-" * 50)
+    if not phase1_timing.get("cached"):
+        print(f"  Phase 1 — Model load:      {phase1_timing['model_load_seconds']:.1f}s")
+        print(f"  Phase 1 — RAG batch:       {phase1_timing['rag_batch_seconds']:.1f}s")
+        print(f"  Phase 1 — Vanilla batch:   {phase1_timing['vanilla_batch_seconds']:.1f}s")
+    else:
+        print(f"  Phase 1 — (cached)")
+    print(f"  Phase 2 — Server startup:  {phase2_timing['server_startup_seconds']:.1f}s")
+    print(f"  Phase 2 — Agentic batch:   {phase2_timing['agentic_batch_seconds']:.1f}s")
+    print(f"  Phase 3 — Judge:           {t_phase3:.1f}s")
+    print(f"  Total:                     {timing['total_seconds']:.1f}s")
+    print("-" * 50 + "\n")
+
     filename = (f"{model_name}_vect{vectordb_config['text_chunk_size']}"
                 f"_t{TEMPERATURE}.json")
     save_evaluation_results(meta_data, results, RESULTS_DIR, filename)

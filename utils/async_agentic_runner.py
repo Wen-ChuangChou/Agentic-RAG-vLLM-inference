@@ -39,7 +39,7 @@ def _create_agent(model_config: dict, vectordb) -> CodeAgent:
         model=llm,
         planning_interval=5,
         max_steps=30,
-        verbosity_level=LogLevel.INFO,
+        verbosity_level=LogLevel.ERROR,
     )
     return agent
 
