@@ -159,7 +159,12 @@ class VLLMServerManager:
         )
 
     def stop(self) -> None:
-        """Stop the vLLM server subprocess (kills entire process group)."""
+        """Stop the vLLM server subprocess (kills entire process group).
+
+        Uses SIGTERM first, then SIGKILL as fallback.  After termination
+        we briefly pause to give the CUDA driver time to reclaim GPU
+        memory from the defunct worker processes.
+        """
         if self._process is None:
             return
 
@@ -178,6 +183,12 @@ class VLLMServerManager:
             print("vLLM server stopped.")
 
         self._process = None
+
+        # Give the CUDA driver time to reclaim GPU memory from the killed
+        # worker processes.  Without this, the next phase may see stale
+        # GPU allocations and fail with OOM.
+        print("Waiting 15s for GPU memory reclaim after server shutdown ...")
+        time.sleep(15)
 
     # ------------------------------------------------------------------
     # Context manager

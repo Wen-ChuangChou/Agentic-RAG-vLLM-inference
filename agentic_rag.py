@@ -66,15 +66,70 @@ def _resolve_model_path(config: dict) -> str:
     return env_path or cfg_path or model_id
 
 
-def _gpu_cleanup(label: str = "") -> None:
-    """Force GPU memory release between phases."""
-    import time
+def _gpu_cleanup(label: str = "",
+                 min_free_fraction: float = 0.80,
+                 timeout: int = 120,
+                 poll_interval: int = 5) -> None:
+    """Force GPU memory release between phases.
+
+    After clearing the *main* process CUDA cache, poll all visible GPUs
+    until at least *min_free_fraction* of each GPU's total memory is
+    free.  This is necessary because Phase 2 runs vLLM in a subprocess
+    tree — ``torch.cuda.empty_cache()`` in the main process has no
+    effect on memory held by those worker processes.  We must wait for
+    that memory to be reclaimed by the driver after the processes exit.
+
+    Args:
+        label: Human-readable label for log messages.
+        min_free_fraction: Minimum fraction of GPU memory that must be
+            free on *every* device before we proceed (0.0–1.0).
+        timeout: Maximum seconds to wait.  A warning is emitted if the
+            timeout is reached.
+        poll_interval: Seconds between memory checks.
+    """
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
-    time.sleep(5)
-    print(f"GPU memory cleaned up{' after ' + label if label else ''}.")
+
+    if not torch.cuda.is_available():
+        print(f"GPU memory cleaned up{' after ' + label if label else ''}.")
+        return
+
+    n_gpus = torch.cuda.device_count()
+    start = time.time()
+
+    while time.time() - start < timeout:
+        all_free = True
+        for i in range(n_gpus):
+            free, total = torch.cuda.mem_get_info(i)
+            frac = free / total if total > 0 else 1.0
+            if frac < min_free_fraction:
+                all_free = False
+                break
+
+        if all_free:
+            elapsed = time.time() - start
+            print(f"GPU memory cleaned up{' after ' + label if label else ''} "
+                  f"({elapsed:.0f}s, all {n_gpus} GPUs "
+                  f"\u2265{min_free_fraction:.0%} free).")
+            return
+
+        # Log progress so the user knows we're waiting
+        elapsed = int(time.time() - start)
+        free_gb = [f"{torch.cuda.mem_get_info(i)[0] / 2**30:.1f}"
+                   for i in range(n_gpus)]
+        total_gb = torch.cuda.mem_get_info(0)[1] / 2**30
+        print(f"  [{elapsed}s/{timeout}s] Waiting for GPU memory release "
+              f"(free GiB per GPU: [{', '.join(free_gb)}] / {total_gb:.1f})"
+              " ...")
+        time.sleep(poll_interval)
+
+    # Timeout — proceed anyway but warn loudly
+    free_gb = [f"{torch.cuda.mem_get_info(i)[0] / 2**30:.1f}"
+               for i in range(n_gpus)]
+    print(f"WARNING: GPU memory cleanup timed out after {timeout}s "
+          f"(free GiB: [{', '.join(free_gb)}]).  Proceeding anyway.")
 
 
 # ===================================================================
@@ -123,7 +178,7 @@ def phase1_offline_batch(config, eval_dataset, retriever_tool,
         model_id=model_id,
         tensor_parallel_size=model_cfg.get("tensor_parallel_size", 2),
         gpu_memory_utilization=model_cfg.get("gpu_memory_utilization", 0.92),
-        max_model_len=model_cfg.get("max_model_len", 131072),
+        max_model_len=model_cfg.get("phase1_max_model_len", model_cfg.get("max_model_len", 131072)),
         trust_remote_code=model_cfg.get("trust_remote_code", True),
         dtype=model_cfg.get("dtype", "auto"),
         enforce_eager=model_cfg.get("enforce_eager", False),
@@ -224,7 +279,7 @@ def phase2_agentic(config, eval_dataset, prompt_config, vectordb,
             tensor_parallel_size=model_cfg.get("tensor_parallel_size", 2),
             gpu_memory_utilization=model_cfg.get("gpu_memory_utilization",
                                                  0.92),
-            max_model_len=model_cfg.get("max_model_len", 131072),
+            max_model_len=model_cfg.get("phase2_max_model_len", model_cfg.get("max_model_len", 131072)),
             dtype=model_cfg.get("dtype", "auto"),
             trust_remote_code=model_cfg.get("trust_remote_code", True),
             enable_prefix_caching=True,
@@ -536,7 +591,7 @@ def main():
             "tensor_parallel_size": model_cfg.get("tensor_parallel_size"),
             "gpu_memory_utilization": model_cfg.get(
                 "gpu_memory_utilization"),
-            "max_model_len": model_cfg.get("max_model_len"),
+            "max_model_len": model_cfg.get("phase1_max_model_len", model_cfg.get("max_model_len")),
             "dtype": model_cfg.get("dtype"),
             "enforce_eager": model_cfg.get("enforce_eager"),
             "temperature": model_cfg.get("temperature"),
@@ -545,6 +600,7 @@ def main():
         "server": {
             "port": server_cfg.get("port"),
             "extra_args": server_cfg.get("extra_args"),
+            "max_model_len": model_cfg.get("phase2_max_model_len", model_cfg.get("max_model_len")),
         },
         "async": {
             "concurrency": async_cfg.get("concurrency"),

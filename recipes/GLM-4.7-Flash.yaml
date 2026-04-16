@@ -13,6 +13,8 @@ model:
   tensor_parallel_size: 4
   gpu_memory_utilization: 0.92
   max_model_len: 16384
+  phase1_max_model_len: 8192
+  phase2_max_model_len: 65536
   dtype: "auto"
   trust_remote_code: true
   temperature: 0.2
@@ -32,12 +34,12 @@ evaluation:
   model_id: "openai/gpt-oss-120b"
   model_path: ""                            # Set by VLLM_JUDGE_MODEL_PATH env var
   temperature: 0.0
-  max_tokens: 8192
-  max_model_len: 16384                       # Judge prompts are short; saves GPU memory
+  max_model_len: 8192  
+  max_tokens: 4096
 
 # === Async agentic settings (Phase 2) ===
 async:
-  concurrency: 10                          # Number of concurrent agentic queries
+  concurrency: 5                          # Number of concurrent agentic queries
   checkpoint_interval: 5                    # Save checkpoint every N completions
 
 # === Vector DB config ===

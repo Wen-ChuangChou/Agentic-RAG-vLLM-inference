@@ -37,8 +37,8 @@ def _create_agent(model_config: dict, vectordb) -> CodeAgent:
     agent = CodeAgent(
         tools=[retriever],
         model=llm,
-        planning_interval=5,
-        max_steps=30,
+        planning_interval=3,
+        max_steps=12,
         verbosity_level=LogLevel.ERROR,
     )
     return agent
