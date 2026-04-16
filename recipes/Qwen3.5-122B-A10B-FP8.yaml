@@ -8,23 +8,24 @@
 
 # === Main model (Phases 1 & 2) ===
 model:
-  model_id: "zai-org/GLM-4.7-Flash"
+  model_id: "Qwen/Qwen3.5-122B-A10B-FP8"
   model_path: ""                            # Set by VLLM_MODEL_PATH env var or NVMe staging
   tensor_parallel_size: 2
   gpu_memory_utilization: 0.92
-  max_model_len: 16384
+  max_model_len: 131072
   dtype: "auto"
   trust_remote_code: true
   temperature: 0.2
-  max_tokens: 8192
-  enforce_eager: false                       # Workaround for Hopper TMA descriptor crash
+  max_tokens: 16384
+  # enforce_eager: true                       # Workaround for Hopper TMA descriptor crash
 
 # === vLLM server settings (Phase 2 only) ===
 server:
   port: 8000
   api_key: "ai4all"
   host: "0.0.0.0"
-  extra_args: ["--enforce-eager"]        # Workaround for Hopper TMA descriptor crash in FlashAttention MLA
+  extra_args: []        # Workaround for Hopper TMA descriptor crash in FlashAttention MLA
+  # extra_args: ["--enforce-eager"]        # Workaround for Hopper TMA descriptor crash in FlashAttention MLA
 
 # === Evaluation judge model (Phase 3) ===
 evaluation:
