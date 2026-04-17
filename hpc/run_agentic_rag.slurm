@@ -14,8 +14,8 @@
 #============================================================================
 
 #SBATCH --job-name=agentic-rag
-#SBATCH --output=logs/agentic-rag-%x-%j.out
-#SBATCH --error=logs/agentic-rag-%x-%j.err
+#SBATCH --output=logs/%x-%j.out
+#SBATCH --error=logs/%x-%j.err
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=4

@@ -162,6 +162,7 @@ class AsyncAgenticRunner:
 
             last_error = None
             for attempt in range(1 + self.max_retries):
+
                 def _run_agent():
                     agent = _create_agent(self.model_config, self.vectordb)
                     return agent.run(enhanced)

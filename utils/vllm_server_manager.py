@@ -161,25 +161,59 @@ class VLLMServerManager:
     def stop(self) -> None:
         """Stop the vLLM server subprocess (kills entire process group).
 
-        Uses SIGTERM first, then SIGKILL as fallback.  After termination
-        we briefly pause to give the CUDA driver time to reclaim GPU
-        memory from the defunct worker processes.
+        Uses psutil to recursively track and kill all children (Ray/multiprocessing
+        workers). It waits for ALL processes to die, ensuring that stubborn child
+        workers don't outlive the parent and hold onto GPU memory.
         """
         if self._process is None:
             return
 
         if self._process.poll() is None:
             print(f"Stopping vLLM server (PID {self._process.pid}) ...")
+            
+            procs = []
             try:
-                pgid = os.getpgid(self._process.pid)
-                os.killpg(pgid, signal.SIGTERM)
-                self._process.wait(timeout=30)
-            except (ProcessLookupError, subprocess.TimeoutExpired):
+                import psutil
+                parent = psutil.Process(self._process.pid)
+                procs = parent.children(recursive=True)
+                procs.append(parent)
+            except (ImportError, psutil.NoSuchProcess):
+                pass
+
+            if procs:
+                import psutil
+                # 1. Graceful SIGTERM
+                for p in procs:
+                    try:
+                        p.send_signal(signal.SIGTERM)
+                    except psutil.NoSuchProcess:
+                        pass
+                
+                # Wait for ALL processes (parent + children) to die
+                gone, alive = psutil.wait_procs(procs, timeout=10)
+                
+                # 2. Forceful SIGKILL to any survivors
+                if alive:
+                    print(f"vLLM server didn't stop cleanly ({len(alive)} processes hanging). Sending SIGKILL...")
+                    for p in alive:
+                        try:
+                            p.send_signal(signal.SIGKILL)
+                        except psutil.NoSuchProcess:
+                            pass
+                    psutil.wait_procs(alive, timeout=5)
+            else:
+                # Fallback if psutil fails/missing
                 try:
-                    os.killpg(pgid, signal.SIGKILL)
-                    self._process.wait(timeout=10)
+                    pgid = os.getpgid(self._process.pid)
+                    os.killpg(pgid, signal.SIGTERM)
+                    self._process.wait(timeout=30)
                 except (ProcessLookupError, subprocess.TimeoutExpired):
-                    pass
+                    try:
+                        os.killpg(pgid, signal.SIGKILL)
+                        self._process.wait(timeout=10)
+                    except (ProcessLookupError, subprocess.TimeoutExpired):
+                        pass
+
             print("vLLM server stopped.")
 
         self._process = None
