@@ -68,8 +68,8 @@ def _resolve_model_path(config: dict) -> str:
 
 def _gpu_cleanup(label: str = "",
                  min_free_fraction: float = 0.80,
-                 timeout: int = 120,
-                 poll_interval: int = 5) -> None:
+                 timeout: int = 180,
+                 poll_interval: int = 10) -> None:
     """Force GPU memory release between phases.
 
     After clearing the *main* process CUDA cache, poll all visible GPUs

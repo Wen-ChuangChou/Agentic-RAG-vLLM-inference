@@ -8,6 +8,10 @@ utilisation.
 
 smolagents CodeAgent.run() is synchronous, so each call is wrapped in
 asyncio.to_thread() and guarded by a semaphore to cap concurrency.
+
+Resilience: each agent is guarded by a wall-clock timeout.  If the model
+enters a degenerate repetition loop (GPU goes idle, no tokens produced),
+the agent is killed and a fresh one retries the same question.
 """
 
 import asyncio
@@ -32,6 +36,9 @@ def _create_agent(model_config: dict, vectordb) -> CodeAgent:
         api_key=model_config.get("api_key", "ai4all"),
         max_tokens=model_config.get("max_tokens", 16384),
         temperature=model_config.get("temperature", 0.2),
+        # HTTP-level timeout (seconds) per API call.  Ensures threads exit
+        # naturally when vLLM hangs instead of becoming unkillable zombies.
+        client_kwargs={"timeout": 90.0},
     )
     retriever = RetrieverTool(vectordb)
     agent = CodeAgent(
@@ -56,6 +63,8 @@ class AsyncAgenticRunner:
         concurrency: int = 16,
         checkpoint_file: Optional[Path] = None,
         checkpoint_interval: int = 5,
+        agent_timeout: float = 120.0,
+        max_retries: int = 2,
     ):
         self.eval_dataset = eval_dataset
         self.model_config = model_config
@@ -65,6 +74,8 @@ class AsyncAgenticRunner:
         self.checkpoint_file = (Path(checkpoint_file)
                                 if checkpoint_file else None)
         self.checkpoint_interval = checkpoint_interval
+        self.agent_timeout = agent_timeout
+        self.max_retries = max_retries
 
         # Thread-safe state
         self._lock = threading.Lock()
@@ -137,33 +148,67 @@ class AsyncAgenticRunner:
 
     async def _process_question(self, idx: int,
                                 semaphore: asyncio.Semaphore) -> None:
-        """Process a single question with an agent (runs in a thread)."""
+        """Process a single question with an agent (runs in a thread).
+
+        If the agent exceeds ``agent_timeout`` seconds (likely stuck in a
+        degenerate repetition loop), it is killed and a fresh agent retries
+        the same question.  Up to ``max_retries`` retry attempts are made
+        before recording a timeout error.
+        """
         async with semaphore:
             example = self.eval_dataset[idx]
             question = example["question"]
             enhanced = self.prompt_config["prompt"].format(question=question)
 
-            def _run_agent():
-                agent = _create_agent(self.model_config, self.vectordb)
-                return agent.run(enhanced)
+            last_error = None
+            for attempt in range(1 + self.max_retries):
+                def _run_agent():
+                    agent = _create_agent(self.model_config, self.vectordb)
+                    return agent.run(enhanced)
 
-            try:
-                answer = await asyncio.to_thread(_run_agent)
-                result = {
-                    "question": question,
-                    "true_answer": example["answer"],
-                    "source_doc": example["source_doc"],
-                    "generated_answer": str(answer),
-                }
-            except Exception as e:
-                print(f"\nError at question {idx}: {e}")
-                result = {
-                    "question": question,
-                    "true_answer": example["answer"],
-                    "source_doc": example["source_doc"],
-                    "generated_answer": f"Error: {str(e)}",
-                }
+                try:
+                    answer = await asyncio.wait_for(
+                        asyncio.to_thread(_run_agent),
+                        timeout=self.agent_timeout,
+                    )
+                    result = {
+                        "question": question,
+                        "true_answer": example["answer"],
+                        "source_doc": example["source_doc"],
+                        "generated_answer": str(answer),
+                    }
+                    self._record_result(idx, result)
+                    return  # success — exit retry loop
 
+                except asyncio.TimeoutError:
+                    last_error = "Agent timed out"
+                    remaining = self.max_retries - attempt
+                    if remaining > 0:
+                        print(f"\nTimeout at question {idx} "
+                              f"(>{self.agent_timeout:.0f}s), "
+                              f"retrying ({remaining} left)")
+                    else:
+                        print(f"\nTimeout at question {idx} "
+                              f"(>{self.agent_timeout:.0f}s), "
+                              f"no retries left")
+
+                except Exception as e:
+                    last_error = str(e)
+                    remaining = self.max_retries - attempt
+                    if remaining > 0:
+                        print(f"\nError at question {idx}: {e}, "
+                              f"retrying ({remaining} left)")
+                    else:
+                        print(f"\nError at question {idx}: {e}, "
+                              f"no retries left")
+
+            # All attempts exhausted
+            result = {
+                "question": question,
+                "true_answer": example["answer"],
+                "source_doc": example["source_doc"],
+                "generated_answer": f"Error: {last_error}",
+            }
             self._record_result(idx, result)
 
     async def run(self) -> List[dict]:
@@ -177,7 +222,9 @@ class AsyncAgenticRunner:
             return self._get_ordered_results()
 
         print(f"Running {len(remaining)} agentic queries "
-              f"(concurrency={self.concurrency})...")
+              f"(concurrency={self.concurrency}, "
+              f"timeout={self.agent_timeout:.0f}s, "
+              f"max_retries={self.max_retries})...")
 
         semaphore = asyncio.Semaphore(self.concurrency)
         self._pbar = tqdm(
@@ -211,6 +258,8 @@ async def run_agentic_batch(
     concurrency: int = 16,
     checkpoint_file: Optional[Path] = None,
     checkpoint_interval: int = 5,
+    agent_timeout: float = 120.0,
+    max_retries: int = 2,
 ) -> List[dict]:
     """
     Run concurrent agentic RAG evaluation.
@@ -223,6 +272,11 @@ async def run_agentic_batch(
         concurrency: Max simultaneous agentic queries.
         checkpoint_file: Path for resumable checkpointing.
         checkpoint_interval: Save checkpoint every N completions.
+        agent_timeout: Max wall-clock seconds per agent attempt.  If
+            exceeded the agent is killed (likely stuck in a degenerate
+            repetition loop) and retried.
+        max_retries: Number of retry attempts after a timeout or error
+            before recording the question as failed.
 
     Returns:
         Ordered list of result dicts.
@@ -235,5 +289,7 @@ async def run_agentic_batch(
         concurrency=concurrency,
         checkpoint_file=checkpoint_file,
         checkpoint_interval=checkpoint_interval,
+        agent_timeout=agent_timeout,
+        max_retries=max_retries,
     )
     return await runner.run()

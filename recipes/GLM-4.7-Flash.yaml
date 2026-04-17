@@ -11,10 +11,11 @@ model:
   model_id: "zai-org/GLM-4.7-Flash"
   model_path: ""                            # Set by VLLM_MODEL_PATH env var or NVMe staging
   tensor_parallel_size: 4
-  gpu_memory_utilization: 0.92
+  gpu_memory_utilization: 0.94
   max_model_len: 16384
   phase1_max_model_len: 8192
-  phase2_max_model_len: 65536
+  # phase2_max_model_len: 131072
+  phase2_max_model_len: 32768
   dtype: "auto"
   trust_remote_code: true
   temperature: 0.2
@@ -39,7 +40,7 @@ evaluation:
 
 # === Async agentic settings (Phase 2) ===
 async:
-  concurrency: 5                          # Number of concurrent agentic queries
+  concurrency: 16                          # Number of concurrent agentic queries
   checkpoint_interval: 5                    # Save checkpoint every N completions
 
 # === Vector DB config ===
