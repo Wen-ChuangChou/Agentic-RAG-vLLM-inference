@@ -20,7 +20,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=4
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=128G
+#SBATCH --mem=256G
 #SBATCH --time=00:30:00
 #SBATCH --partition=capella
 #SBATCH --mail-user=wen-chuang.chou@tu-dresden.de

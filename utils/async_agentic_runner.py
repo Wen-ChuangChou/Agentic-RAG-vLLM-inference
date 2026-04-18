@@ -28,7 +28,7 @@ from tqdm import tqdm
 from utils.agent_tools import RetrieverTool
 
 
-def _create_agent(model_config: dict, vectordb) -> CodeAgent:
+def _create_agent(model_config: dict, vectordb, planning_interval: int = 3, max_steps: int = 12) -> CodeAgent:
     """Create a fresh CodeAgent instance for a single agentic run."""
     llm = OpenAIServerModel(
         model_id=model_config["model_id"],
@@ -44,8 +44,8 @@ def _create_agent(model_config: dict, vectordb) -> CodeAgent:
     agent = CodeAgent(
         tools=[retriever],
         model=llm,
-        planning_interval=3,
-        max_steps=12,
+        planning_interval=planning_interval,
+        max_steps=max_steps,
         verbosity_level=LogLevel.ERROR,
     )
     return agent
@@ -65,6 +65,8 @@ class AsyncAgenticRunner:
         checkpoint_interval: int = 5,
         agent_timeout: float = 120.0,
         max_retries: int = 2,
+        planning_interval: int = 3,
+        max_steps: int = 12,
     ):
         self.eval_dataset = eval_dataset
         self.model_config = model_config
@@ -76,6 +78,8 @@ class AsyncAgenticRunner:
         self.checkpoint_interval = checkpoint_interval
         self.agent_timeout = agent_timeout
         self.max_retries = max_retries
+        self.planning_interval = planning_interval
+        self.max_steps = max_steps
 
         # Thread-safe state
         self._lock = threading.Lock()
@@ -164,7 +168,11 @@ class AsyncAgenticRunner:
             for attempt in range(1 + self.max_retries):
 
                 def _run_agent():
-                    agent = _create_agent(self.model_config, self.vectordb)
+                    agent = _create_agent(
+                        self.model_config, self.vectordb,
+                        planning_interval=self.planning_interval,
+                        max_steps=self.max_steps
+                    )
                     return agent.run(enhanced)
 
                 try:
@@ -261,6 +269,8 @@ async def run_agentic_batch(
     checkpoint_interval: int = 5,
     agent_timeout: float = 120.0,
     max_retries: int = 2,
+    planning_interval: int = 3,
+    max_steps: int = 12,
 ) -> List[dict]:
     """
     Run concurrent agentic RAG evaluation.
@@ -292,5 +302,7 @@ async def run_agentic_batch(
         checkpoint_interval=checkpoint_interval,
         agent_timeout=agent_timeout,
         max_retries=max_retries,
+        planning_interval=planning_interval,
+        max_steps=max_steps,
     )
     return await runner.run()

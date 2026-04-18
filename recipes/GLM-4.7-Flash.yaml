@@ -42,6 +42,8 @@ evaluation:
 async:
   concurrency: 16                          # Number of concurrent agentic queries
   checkpoint_interval: 5                    # Save checkpoint every N completions
+  planning_interval: 3                      # Number of steps before replanning
+  max_steps: 12                             # Maximum execution steps per agent
 
 # === Vector DB config ===
 vectordb:

@@ -117,8 +117,10 @@ def _gpu_cleanup(label: str = "",
 
         # Log progress so the user knows we're waiting
         elapsed = int(time.time() - start)
-        free_gb = [f"{torch.cuda.mem_get_info(i)[0] / 2**30:.1f}"
-                   for i in range(n_gpus)]
+        free_gb = [
+            f"{torch.cuda.mem_get_info(i)[0] / 2**30:.1f}"
+            for i in range(n_gpus)
+        ]
         total_gb = torch.cuda.mem_get_info(0)[1] / 2**30
         print(f"  [{elapsed}s/{timeout}s] Waiting for GPU memory release "
               f"(free GiB per GPU: [{', '.join(free_gb)}] / {total_gb:.1f})"
@@ -126,8 +128,9 @@ def _gpu_cleanup(label: str = "",
         time.sleep(poll_interval)
 
     # Timeout — proceed anyway but warn loudly
-    free_gb = [f"{torch.cuda.mem_get_info(i)[0] / 2**30:.1f}"
-               for i in range(n_gpus)]
+    free_gb = [
+        f"{torch.cuda.mem_get_info(i)[0] / 2**30:.1f}" for i in range(n_gpus)
+    ]
     print(f"WARNING: GPU memory cleanup timed out after {timeout}s "
           f"(free GiB: [{', '.join(free_gb)}]).  Proceeding anyway.")
 
@@ -178,7 +181,8 @@ def phase1_offline_batch(config, eval_dataset, retriever_tool,
         model_id=model_id,
         tensor_parallel_size=model_cfg.get("tensor_parallel_size", 2),
         gpu_memory_utilization=model_cfg.get("gpu_memory_utilization", 0.92),
-        max_model_len=model_cfg.get("phase1_max_model_len", model_cfg.get("max_model_len", 131072)),
+        max_model_len=model_cfg.get("phase1_max_model_len",
+                                    model_cfg.get("max_model_len", 131072)),
         trust_remote_code=model_cfg.get("trust_remote_code", True),
         dtype=model_cfg.get("dtype", "auto"),
         enforce_eager=model_cfg.get("enforce_eager", False),
@@ -279,7 +283,9 @@ def phase2_agentic(config, eval_dataset, prompt_config, vectordb,
             tensor_parallel_size=model_cfg.get("tensor_parallel_size", 2),
             gpu_memory_utilization=model_cfg.get("gpu_memory_utilization",
                                                  0.92),
-            max_model_len=model_cfg.get("phase2_max_model_len", model_cfg.get("max_model_len", 131072)),
+            max_model_len=model_cfg.get("phase2_max_model_len",
+                                        model_cfg.get("max_model_len",
+                                                      131072)),
             dtype=model_cfg.get("dtype", "auto"),
             trust_remote_code=model_cfg.get("trust_remote_code", True),
             enable_prefix_caching=True,
@@ -298,6 +304,8 @@ def phase2_agentic(config, eval_dataset, prompt_config, vectordb,
 
         concurrency = async_cfg.get("concurrency", 16)
         ckpt_interval = async_cfg.get("checkpoint_interval", 5)
+        planning_interval = async_cfg.get("planning_interval", 3)
+        max_steps = async_cfg.get("max_steps", 12)
 
         t_agentic = time.time()
         agentic_results = asyncio.run(
@@ -309,6 +317,8 @@ def phase2_agentic(config, eval_dataset, prompt_config, vectordb,
                 concurrency=concurrency,
                 checkpoint_file=agentic_ckpt,
                 checkpoint_interval=ckpt_interval,
+                planning_interval=planning_interval,
+                max_steps=max_steps,
             ))
         t_agentic = time.time() - t_agentic
         print(f"Agentic batch completed in {t_agentic:.1f}s")
@@ -367,7 +377,8 @@ def phase3_judge(config, all_outputs, evaluation_prompt, checkpoints_dir):
         max_model_len=eval_cfg.get("max_model_len", 8192),
         trust_remote_code=model_cfg.get("trust_remote_code", True),
         dtype=model_cfg.get("dtype", "auto"),
-        enforce_eager=eval_cfg.get("enforce_eager", model_cfg.get("enforce_eager", False)),
+        enforce_eager=eval_cfg.get("enforce_eager",
+                                   model_cfg.get("enforce_eager", False)),
     )
 
     sampling = SamplingParams(
@@ -501,8 +512,9 @@ def main():
     # ==================================================================
     #  Phase 2 — Async Agentic RAG
     # ==================================================================
-    agentic_results, phase2_timing = phase2_agentic(
-        config, eval_dataset, prompt_config, vectordb, CHECKPOINTS_DIR)
+    agentic_results, phase2_timing = phase2_agentic(config, eval_dataset,
+                                                    prompt_config, vectordb,
+                                                    CHECKPOINTS_DIR)
 
     # GPU cleanup between Phase 2 and Phase 3
     _gpu_cleanup("Phase 2")
@@ -544,6 +556,7 @@ def main():
 
     # Calculate scores
     results = {}
+    scores = {}
     DEFAULT_SCORE = 2
     for sys_type in ["agentic_rag", "standard_rag", "standard"]:
         df = pd.DataFrame.from_dict(evaluated[sys_type])
@@ -556,6 +569,7 @@ def main():
                                           1) / 2
 
         avg = df["eval_score_LLM_judge_int"].mean() * 100
+        scores[sys_type] = avg
         print(f"  {sys_type:20s} → {avg:.1f}%")
         results[sys_type] = df
 
@@ -577,34 +591,48 @@ def main():
     }
 
     # Compute total (handle cached Phase 1 gracefully)
-    p1_total = (phase1_timing.get("model_load_seconds", 0)
-                + phase1_timing.get("rag_batch_seconds", 0)
-                + phase1_timing.get("vanilla_batch_seconds", 0))
-    p2_total = (phase2_timing.get("server_startup_seconds", 0)
-                + phase2_timing.get("agentic_batch_seconds", 0))
+    p1_total = (phase1_timing.get("model_load_seconds", 0) +
+                phase1_timing.get("rag_batch_seconds", 0) +
+                phase1_timing.get("vanilla_batch_seconds", 0))
+    p2_total = (phase2_timing.get("server_startup_seconds", 0) +
+                phase2_timing.get("agentic_batch_seconds", 0))
     timing["total_seconds"] = round(p1_total + p2_total + t_phase3, 2)
 
     # vLLM configuration snapshot — record actual config values, no defaults
     vllm_config = {
         "offline": {
-            "model_id": model_cfg["model_id"],
-            "tensor_parallel_size": model_cfg.get("tensor_parallel_size"),
-            "gpu_memory_utilization": model_cfg.get(
-                "gpu_memory_utilization"),
-            "max_model_len": model_cfg.get("phase1_max_model_len", model_cfg.get("max_model_len")),
-            "dtype": model_cfg.get("dtype"),
-            "enforce_eager": model_cfg.get("enforce_eager"),
-            "temperature": model_cfg.get("temperature"),
-            "max_tokens": model_cfg.get("max_tokens"),
+            "model_id":
+            model_cfg["model_id"],
+            "tensor_parallel_size":
+            model_cfg.get("tensor_parallel_size"),
+            "gpu_memory_utilization":
+            model_cfg.get("gpu_memory_utilization"),
+            "max_model_len":
+            model_cfg.get("phase1_max_model_len",
+                          model_cfg.get("max_model_len")),
+            "dtype":
+            model_cfg.get("dtype"),
+            "enforce_eager":
+            model_cfg.get("enforce_eager"),
+            "temperature":
+            model_cfg.get("temperature"),
+            "max_tokens":
+            model_cfg.get("max_tokens"),
         },
         "server": {
-            "port": server_cfg.get("port"),
-            "extra_args": server_cfg.get("extra_args"),
-            "max_model_len": model_cfg.get("phase2_max_model_len", model_cfg.get("max_model_len")),
+            "port":
+            server_cfg.get("port"),
+            "extra_args":
+            server_cfg.get("extra_args"),
+            "max_model_len":
+            model_cfg.get("phase2_max_model_len",
+                          model_cfg.get("max_model_len")),
         },
         "async": {
             "concurrency": async_cfg.get("concurrency"),
             "checkpoint_interval": async_cfg.get("checkpoint_interval"),
+            "planning_interval": async_cfg.get("planning_interval"),
+            "max_steps": async_cfg.get("max_steps"),
         },
         "judge": {
             "model_id": eval_cfg.get("model_id"),
@@ -621,6 +649,7 @@ def main():
         "eval_model_name": eval_model_name,
         "eval_model_id": eval_cfg.get("model_id", "unknown"),
         "timing": timing,
+        "scores": scores,
         "vllm_config": vllm_config,
         "num_questions": len(eval_dataset),
     }
@@ -630,13 +659,23 @@ def main():
     print(" Timing Summary")
     print("-" * 50)
     if not phase1_timing.get("cached"):
-        print(f"  Phase 1 — Model load:      {phase1_timing['model_load_seconds']:.1f}s")
-        print(f"  Phase 1 — RAG batch:       {phase1_timing['rag_batch_seconds']:.1f}s")
-        print(f"  Phase 1 — Vanilla batch:   {phase1_timing['vanilla_batch_seconds']:.1f}s")
+        print(
+            f"  Phase 1 — Model load:      {phase1_timing['model_load_seconds']:.1f}s"
+        )
+        print(
+            f"  Phase 1 — RAG batch:       {phase1_timing['rag_batch_seconds']:.1f}s"
+        )
+        print(
+            f"  Phase 1 — Vanilla batch:   {phase1_timing['vanilla_batch_seconds']:.1f}s"
+        )
     else:
         print(f"  Phase 1 — (cached)")
-    print(f"  Phase 2 — Server startup:  {phase2_timing['server_startup_seconds']:.1f}s")
-    print(f"  Phase 2 — Agentic batch:   {phase2_timing['agentic_batch_seconds']:.1f}s")
+    print(
+        f"  Phase 2 — Server startup:  {phase2_timing['server_startup_seconds']:.1f}s"
+    )
+    print(
+        f"  Phase 2 — Agentic batch:   {phase2_timing['agentic_batch_seconds']:.1f}s"
+    )
     print(f"  Phase 3 — Judge:           {t_phase3:.1f}s")
     print(f"  Total:                     {timing['total_seconds']:.1f}s")
     print("-" * 50 + "\n")

@@ -29,7 +29,7 @@ def save_evaluation_results(json_results: dict, results: dict,
     if save_path.exists():
         stem = save_path.stem
         suffix = save_path.suffix
-        timestamp = datetime.now().strftime("%m%d")
+        timestamp = datetime.now().strftime("%m%d_%H%M")
         new_filename = f"{stem}_{timestamp}{suffix}"
         save_path = Path(RESULTS_DIR) / new_filename
         print(f"File already exists. Saving as: {save_path}")
