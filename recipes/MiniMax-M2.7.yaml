@@ -8,7 +8,7 @@
 
 # === Main model (Phases 1 & 2) ===
 model:
-  model_id: "Qwen/Qwen3.5-122B-A10B-FP8"
+  model_id: "MiniMaxAI/MiniMax-M2.7"
   model_path: ""                            # Set by VLLM_MODEL_PATH env var or NVMe staging
   tensor_parallel_size: 4
   gpu_memory_utilization: 0.94
@@ -40,7 +40,7 @@ evaluation:
 
 # === Async agentic settings (Phase 2) ===
 async:
-  concurrency: 32                          # Number of concurrent agentic queries
+  concurrency: 16                          # Number of concurrent agentic queries
   checkpoint_interval: 5                    # Save checkpoint every N completions
   planning_interval: 5                      # Number of steps before replanning
   max_steps: 30                             # Maximum execution steps per agent

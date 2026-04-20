@@ -65,12 +65,11 @@ def strip_thinking(text: str) -> str:
     """
     Remove reasoning / chain-of-thought blocks from model output.
 
-    Handles two formats:
+    Handles three formats:
     1. ``<think>...</think>`` tags (e.g. GLM-4.7-Flash, Qwen3).
     2. Inline reasoning prefixed before ``Feedback:`` (e.g. GPT-OSS-120b
        which emits ``analysis...assistantfinalFeedback: ...``).
-
-    For evaluation we only want the final answer.
+    3. Unstructured ``Thinking Process:`` blocks (e.g. Qwen3.5-122B).
     """
     # 1) Handle <think>...</think> tags
     if "</think>" in text:
@@ -78,7 +77,37 @@ def strip_thinking(text: str) -> str:
     # Also strip any remaining opening tags (edge case: no closing tag)
     text = re.sub(r"<think>.*", "", text, flags=re.DOTALL)
 
-    # 2) Handle inline reasoning (e.g. "analysis...assistantfinalFeedback:")
+    # 2) Handle unstructured "Thinking Process:" blocks
+    if "Thinking Process:" in text:
+        markers = [
+            r'\*\s+\*(?:Final Answer|Revised Answer|Drafting the Answer|Drafting the Response|Final Plan|Final decision|Answer|Conclusion):\*',
+            r'\n(?:\d+\.)?\s*\*\*Drafting the (?:Answer|Response):?\*\*',
+            r'\n(?:\d+\.)?\s*\*(?:Final Answer|Revised Answer|Answer):?\*',
+            r'\n(?:\d+\.)?\s*\*(?:Final Plan|Plan):\*',
+            r'\*\s+(?:Final Answer|Answer):'
+        ]
+        best_match_idx = -1
+        for marker in markers:
+            matches = list(re.finditer(marker, text, re.IGNORECASE))
+            if matches:
+                idx = matches[-1].end()
+                best_match_idx = max(best_match_idx, idx)
+                
+        if best_match_idx != -1:
+            ans = text[best_match_idx:].strip()
+        else:
+            # Fallback: grab the last paragraph
+            paragraphs = [p for p in text.split('\n\n') if p.strip()]
+            if len(paragraphs) > 1:
+                ans = paragraphs[-1].strip()
+            else:
+                ans = text[-600:].strip()
+                
+        # Clean up any leftover markdown bullet points from the thought process
+        ans = re.sub(r'^\s*\*\s*', '', ans, flags=re.MULTILINE)
+        text = re.sub(r'^\*(.*)\*$', r'\1', ans, flags=re.MULTILINE).strip()
+
+    # 3) Handle inline reasoning (e.g. "analysis...assistantfinalFeedback:")
     #    The evaluation prompt asks the judge to start output with "Feedback:".
     #    If "Feedback:" appears, take from the *last* occurrence so we get the
     #    clean final output and discard any leaked chain-of-thought.

@@ -28,9 +28,54 @@ from tqdm import tqdm
 from utils.agent_tools import RetrieverTool
 
 
-def _create_agent(model_config: dict, vectordb, planning_interval: int = 3, max_steps: int = 12) -> CodeAgent:
+class CancellableOpenAIServerModel(OpenAIServerModel):
+    """An OpenAI server model that can be safely terminated during timeout."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.cancelled = False
+
+    def __call__(self, *args, **kwargs):
+        if self.cancelled:
+            import sys
+            sys.exit(0)
+        try:
+            return super().__call__(*args, **kwargs)
+        except Exception:
+            if self.cancelled:
+                import sys
+                sys.exit(0)
+            raise
+
+
+class RetryableCodeAgent(CodeAgent):
+    """Custom CodeAgent that prevents leaking chain-of-thought on max_steps exhaustion."""
+
+    def run(self, *args, **kwargs):
+        ans = super().run(*args, **kwargs)
+        ans_str = str(ans)
+
+        # Post-processing cleaning: Detect if the agent hit max_steps and
+        # leaked its rigid scratchpad/planning template.
+        leak_markers = [
+            "Facts Survey",
+            "Facts to look up",
+            "Analyze the Request",
+            "Part 1: Facts Survey",
+        ]
+        if any(marker in ans_str for marker in leak_markers):
+            raise RuntimeError(
+                "Agent reached max_steps and leaked planning template.")
+
+        return ans
+
+
+def _create_agent(model_config: dict,
+                  vectordb,
+                  planning_interval: int = 3,
+                  max_steps: int = 12) -> CodeAgent:
     """Create a fresh CodeAgent instance for a single agentic run."""
-    llm = OpenAIServerModel(
+    llm = CancellableOpenAIServerModel(
         model_id=model_config["model_id"],
         api_base=model_config["api_base"],
         api_key=model_config.get("api_key", "ai4all"),
@@ -41,12 +86,12 @@ def _create_agent(model_config: dict, vectordb, planning_interval: int = 3, max_
         client_kwargs={"timeout": 90.0},
     )
     retriever = RetrieverTool(vectordb)
-    agent = CodeAgent(
+    agent = RetryableCodeAgent(
         tools=[retriever],
         model=llm,
         planning_interval=planning_interval,
         max_steps=max_steps,
-        verbosity_level=LogLevel.ERROR,
+        verbosity_level=LogLevel.INFO,
     )
     return agent
 
@@ -167,12 +212,15 @@ class AsyncAgenticRunner:
             last_error = None
             for attempt in range(1 + self.max_retries):
 
+                agent_ref = []
+
                 def _run_agent():
                     agent = _create_agent(
-                        self.model_config, self.vectordb,
+                        self.model_config,
+                        self.vectordb,
                         planning_interval=self.planning_interval,
-                        max_steps=self.max_steps
-                    )
+                        max_steps=self.max_steps)
+                    agent_ref.append(agent)
                     return agent.run(enhanced)
 
                 try:
@@ -190,6 +238,13 @@ class AsyncAgenticRunner:
                     return  # success — exit retry loop
 
                 except asyncio.TimeoutError:
+                    if agent_ref and hasattr(agent_ref[0], "model"):
+                        llm_model = agent_ref[0].model
+                        llm_model.cancelled = True
+                        if hasattr(llm_model, "client") and hasattr(
+                                llm_model.client, "close"):
+                            llm_model.client.close()
+
                     last_error = "Agent timed out"
                     remaining = self.max_retries - attempt
                     if remaining > 0:
@@ -267,7 +322,7 @@ async def run_agentic_batch(
     concurrency: int = 16,
     checkpoint_file: Optional[Path] = None,
     checkpoint_interval: int = 5,
-    agent_timeout: float = 120.0,
+    agent_timeout: float = 180.0,
     max_retries: int = 2,
     planning_interval: int = 3,
     max_steps: int = 12,

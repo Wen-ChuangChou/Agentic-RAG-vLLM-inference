@@ -10,6 +10,7 @@
 # Usage:
 #   sbatch hpc/run_agentic_rag.slurm
 #   sbatch hpc/run_agentic_rag.slurm recipes/other-model.yaml
+#   sbatch hpc/run_agentic_rag.slurm --test-ids 4 12 20 49 56
 #   VLLM_MODEL_PATH=/path/to/model sbatch hpc/run_agentic_rag.slurm
 #============================================================================
 

@@ -436,6 +436,14 @@ def main():
         help="Test mode: only process first N questions (default: 5)",
     )
     parser.add_argument(
+        "--test-ids",
+        type=int,
+        nargs="+",
+        default=None,
+        metavar="ID",
+        help="Test mode: only process specific question IDs (e.g., --test-ids 4 12 20 49 56)",
+    )
+    parser.add_argument(
         "--embedding-device",
         default="cuda",
         choices=["cpu", "cuda"],
@@ -461,7 +469,9 @@ def main():
     print(f" Model:  {model_cfg['model_id']}")
     print(f" Judge:  {config.get('evaluation', {}).get('model_id', 'N/A')}")
     print(f" Config: {args.config}")
-    if args.test:
+    if args.test_ids:
+        print(f" Mode:   TEST (specific IDs: {args.test_ids})")
+    elif args.test:
         print(f" Mode:   TEST (first {args.test} questions only)")
     print("=" * 60 + "\n")
 
@@ -482,8 +492,12 @@ def main():
     eval_dataset = datasets.load_dataset("m-ric/huggingface_doc_qa_eval",
                                          split="train")
 
-    # --- Test mode: slice dataset to first N questions ---
-    if args.test:
+    # --- Test mode: slice dataset to first N questions or specific IDs ---
+    if args.test_ids:
+        valid_ids = [i for i in args.test_ids if 0 <= i < len(eval_dataset)]
+        eval_dataset = eval_dataset.select(valid_ids)
+        print(f"TEST MODE: using {len(valid_ids)} specific questions: {valid_ids}\n")
+    elif args.test:
         n = min(args.test, len(eval_dataset))
         eval_dataset = eval_dataset.select(range(n))
         print(f"TEST MODE: using {n} of {len(eval_dataset)} questions\n")
