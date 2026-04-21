@@ -157,12 +157,33 @@ def phase1_offline_batch(config, eval_dataset, retriever_tool,
     rag_ckpt = checkpoints_dir / f"{model_name}_phase1_rag.json"
     vanilla_ckpt = checkpoints_dir / f"{model_name}_phase1_vanilla.json"
 
-    cached_rag = load_phase_results(rag_ckpt)
-    cached_vanilla = load_phase_results(vanilla_ckpt)
+    cached_rag_result = load_phase_results(rag_ckpt)
+    cached_vanilla_result = load_phase_results(vanilla_ckpt)
+
+    # Unpack (results, timing_dict) tuples from cache
+    cached_rag, cached_rag_timing = (
+        cached_rag_result if cached_rag_result is not None else (None, {})
+    )
+    cached_vanilla, cached_vanilla_timing = (
+        cached_vanilla_result if cached_vanilla_result is not None else (None, {})
+    )
 
     if cached_rag is not None and cached_vanilla is not None:
         print("Phase 1: Using cached results (both RAG and vanilla).")
-        return cached_rag, cached_vanilla, {"cached": True}
+        # Reconstruct timing from checkpoint if available, else mark as cached
+        rag_elapsed = cached_rag_timing.get("elapsed_time")
+        vanilla_elapsed = cached_vanilla_timing.get("elapsed_time")
+        model_load = cached_rag_timing.get("model_load_seconds")  # stored in rag ckpt
+        if rag_elapsed is not None and vanilla_elapsed is not None:
+            timing = {
+                "model_load_seconds": round(model_load, 2) if model_load is not None else 0.0,
+                "rag_batch_seconds": round(rag_elapsed, 2),
+                "vanilla_batch_seconds": round(vanilla_elapsed, 2),
+                "cached": True,
+            }
+        else:
+            timing = {"cached": True}
+        return cached_rag, cached_vanilla, timing
 
     print("\n" + "=" * 60)
     print(" Phase 1: Offline Batch (Standard RAG + Vanilla)")
@@ -210,7 +231,13 @@ def phase1_offline_batch(config, eval_dataset, retriever_tool,
             "source_doc": eval_dataset[i]["source_doc"],
             "generated_answer": str(a),
         } for i, a in enumerate(rag_answers)]
-        save_phase_results(rag_results, rag_ckpt, "standard_rag")
+        # Store model_load_seconds here (shared across Phase 1) so it can be
+        # recovered when both Phase 1 checkpoints are hit on future runs.
+        save_phase_results(rag_results, rag_ckpt, "standard_rag",
+                           elapsed_time=t_rag,
+                           extra_timing={"model_load_seconds": t_load})
+    else:
+        t_rag = cached_rag_timing.get("elapsed_time") or 0.0
 
     # 1d — Vanilla batch
     t_vanilla = 0.0
@@ -227,7 +254,10 @@ def phase1_offline_batch(config, eval_dataset, retriever_tool,
             "source_doc": eval_dataset[i]["source_doc"],
             "generated_answer": str(a),
         } for i, a in enumerate(vanilla_answers)]
-        save_phase_results(vanilla_results, vanilla_ckpt, "standard")
+        save_phase_results(vanilla_results, vanilla_ckpt, "standard",
+                           elapsed_time=t_vanilla)
+    else:
+        t_vanilla = cached_vanilla_timing.get("elapsed_time") or 0.0
 
     # 1e — Release GPU
     print("\nReleasing GPU memory after Phase 1 ...")
@@ -265,11 +295,33 @@ def phase2_agentic(config, eval_dataset, prompt_config, vectordb,
     model_id = _resolve_model_path(config)
     model_name = model_cfg["model_id"].split("/")[-1]
 
+    # _phase2_agentic.json  — incremental checkpoint for run_agentic_batch
+    # _phase2_summary.json  — save_phase_results summary (timing + final list)
     agentic_ckpt = checkpoints_dir / f"{model_name}_phase2_agentic.json"
+    summary_ckpt = checkpoints_dir / f"{model_name}_phase2_summary.json"
 
     print("\n" + "=" * 60)
     print(" Phase 2: Async Agentic RAG (Concurrent Agents)")
     print("=" * 60)
+
+    # Cache-hit shortcut: if a completed summary checkpoint exists, skip the
+    # server startup entirely and recover timing from the stored values.
+    cached_summary = load_phase_results(summary_ckpt)
+    if cached_summary is not None:
+        cached_agentic, cached_p2_timing = cached_summary
+        print("Phase 2: Using cached results (summary checkpoint found).")
+        agentic_elapsed = cached_p2_timing.get("elapsed_time")
+        server_startup = cached_p2_timing.get("server_startup_seconds")
+        if agentic_elapsed is not None:
+            timing = {
+                "server_startup_seconds": round(server_startup, 2) if server_startup is not None else 0.0,
+                "agentic_batch_seconds": round(agentic_elapsed, 2),
+                "cached": True,
+            }
+        else:
+            timing = {"cached": True}
+        print(f"\nPhase 2 complete: {len(cached_agentic)} agentic results (cached)")
+        return cached_agentic, timing
 
     port = server_cfg.get("port", 8000)
     api_key = server_cfg.get("api_key", "ai4all")
@@ -323,7 +375,13 @@ def phase2_agentic(config, eval_dataset, prompt_config, vectordb,
         t_agentic = time.time() - t_agentic
         print(f"Agentic batch completed in {t_agentic:.1f}s")
 
-    # Server is automatically stopped by the context manager
+    # Server is automatically stopped by the context manager.
+    # Write summary to a SEPARATE file so the agentic incremental
+    # checkpoint (_phase2_agentic.json) is left intact for mid-run resumption.
+    save_phase_results(agentic_results, summary_ckpt, "agentic_rag",
+                       elapsed_time=t_agentic,
+                       extra_timing={"server_startup_seconds": t_server_ready})
+
     timing = {
         "server_startup_seconds": round(t_server_ready, 2),
         "agentic_batch_seconds": round(t_agentic, 2),
@@ -343,6 +401,10 @@ def phase3_judge(config, all_outputs, evaluation_prompt, checkpoints_dir):
     Phase 3: Offline batch Judge LLM evaluation.
     Loads the judge model, scores *all* system outputs in a single
     ``vllm.LLM.chat()`` call, and parses the scores.
+
+    Returns:
+        (judge_results, elapsed_time)  — elapsed_time is None when cached
+        without a recorded timing.
     """
     eval_cfg = config.get("evaluation", {})
     model_cfg = config["model"]
@@ -350,10 +412,12 @@ def phase3_judge(config, all_outputs, evaluation_prompt, checkpoints_dir):
     model_name = model_cfg["model_id"].split("/")[-1]
 
     judge_ckpt = checkpoints_dir / f"{model_name}_phase3_judge.json"
-    cached = load_phase_results(judge_ckpt)
-    if cached is not None:
+    cached_result = load_phase_results(judge_ckpt)
+    if cached_result is not None:
+        cached_judge, cached_p3_timing = cached_result
+        elapsed = cached_p3_timing.get("elapsed_time")
         print("Phase 3: Using cached judge results.")
-        return cached
+        return cached_judge, elapsed
 
     print("\n" + "=" * 60)
     print(" Phase 3: Offline Judge Evaluation")
@@ -386,8 +450,10 @@ def phase3_judge(config, all_outputs, evaluation_prompt, checkpoints_dir):
         max_tokens=eval_cfg.get("max_tokens", 16384),
     )
 
+    t0_judge = time.time()
     judge_answers = run_offline_batch(llm, judge_convos, sampling)
     release_offline_llm(llm)
+    t_judge = time.time() - t0_judge
 
     # Parse "[RESULT]" formatted responses
     judge_results = []
@@ -406,9 +472,9 @@ def phase3_judge(config, all_outputs, evaluation_prompt, checkpoints_dir):
             "eval_feedback_LLM_judge": feedback,
         })
 
-    save_phase_results(judge_results, judge_ckpt, "judge")
+    save_phase_results(judge_results, judge_ckpt, "judge", elapsed_time=t_judge)
     print(f"\nPhase 3 complete: {len(judge_results)} evaluations")
-    return judge_results
+    return judge_results, t_judge
 
 
 # ===================================================================
@@ -542,10 +608,8 @@ def main():
         "standard": vanilla_results,
     }
 
-    t_phase3_start = time.time()
-    judge_results = phase3_judge(config, all_outputs,
-                                 evaluation_prompt["prompt"], CHECKPOINTS_DIR)
-    t_phase3_end = time.time()
+    judge_results, t_phase3_elapsed = phase3_judge(
+        config, all_outputs, evaluation_prompt["prompt"], CHECKPOINTS_DIR)
 
     # ==================================================================
     #  Scoring & Results
@@ -574,13 +638,16 @@ def main():
     DEFAULT_SCORE = 2
     for sys_type in ["agentic_rag", "standard_rag", "standard"]:
         df = pd.DataFrame.from_dict(evaluated[sys_type])
-        df = df.loc[~df["generated_answer"].str.contains("Error", na=False)]
 
         df["eval_score_LLM_judge_int"] = (
             df["eval_score_LLM_judge"].fillna(DEFAULT_SCORE).apply(
                 lambda x: fill_score(x, DEFAULT_SCORE)).astype(float))
         df["eval_score_LLM_judge_int"] = (df["eval_score_LLM_judge_int"] -
                                           1) / 2
+
+        # Failures (e.g. timeout) are kept in the results and counted as 0
+        error_mask = df["generated_answer"].str.contains("Error", na=False)
+        df.loc[error_mask, "eval_score_LLM_judge_int"] = 0.0
 
         avg = df["eval_score_LLM_judge_int"].mean() * 100
         scores[sys_type] = avg
@@ -596,8 +663,8 @@ def main():
     eval_model_name = eval_cfg.get("model_id", "unknown").split("/")[-1]
     TEMPERATURE = model_cfg.get("temperature", 0.2)
 
-    # Timing results
-    t_phase3 = round(t_phase3_end - t_phase3_start, 2)
+    # Timing results  (t_phase3_elapsed is None only for legacy cache hits)
+    t_phase3 = round(t_phase3_elapsed, 2) if t_phase3_elapsed is not None else 0.0
     timing = {
         "phase1": phase1_timing,
         "phase2": phase2_timing,
@@ -666,29 +733,41 @@ def main():
         "scores": scores,
         "vllm_config": vllm_config,
         "num_questions": len(eval_dataset),
+        "slurm_env_vars": {
+            "OMP_NUM_THREADS": os.environ.get("OMP_NUM_THREADS"),
+            "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS": os.environ.get("VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS"),
+            "NCCL_ASYNC_ERROR_HANDLING": os.environ.get("NCCL_ASYNC_ERROR_HANDLING"),
+            "TOKENIZERS_PARALLELISM": os.environ.get("TOKENIZERS_PARALLELISM"),
+            "TORCH_FLOAT32_MATMUL_PRECISION": os.environ.get("TORCH_FLOAT32_MATMUL_PRECISION"),
+            "PYTORCH_CUDA_ALLOC_CONF": os.environ.get("PYTORCH_CUDA_ALLOC_CONF"),
+            "VLLM_WORKER_MULTIPROC_METHOD": os.environ.get("VLLM_WORKER_MULTIPROC_METHOD"),
+        },
     }
 
     # Print timing summary
     print("\n" + "-" * 50)
     print(" Timing Summary")
     print("-" * 50)
-    if not phase1_timing.get("cached"):
-        print(
-            f"  Phase 1 — Model load:      {phase1_timing['model_load_seconds']:.1f}s"
-        )
-        print(
-            f"  Phase 1 — RAG batch:       {phase1_timing['rag_batch_seconds']:.1f}s"
-        )
-        print(
-            f"  Phase 1 — Vanilla batch:   {phase1_timing['vanilla_batch_seconds']:.1f}s"
-        )
+    if phase1_timing.get("cached") and "rag_batch_seconds" not in phase1_timing:
+        # Legacy checkpoint: no timing recorded
+        print(f"  Phase 1 — (cached, no timing recorded)")
     else:
-        print(f"  Phase 1 — (cached)")
+        cached_tag = " (from cache)" if phase1_timing.get("cached") else ""
+        print(
+            f"  Phase 1 — Model load:      {phase1_timing.get('model_load_seconds', 0.0):.1f}s{cached_tag}"
+        )
+        print(
+            f"  Phase 1 — RAG batch:       {phase1_timing.get('rag_batch_seconds', 0.0):.1f}s{cached_tag}"
+        )
+        print(
+            f"  Phase 1 — Vanilla batch:   {phase1_timing.get('vanilla_batch_seconds', 0.0):.1f}s{cached_tag}"
+        )
+    cached_p2_tag = " (from cache)" if phase2_timing.get("cached") else ""
     print(
-        f"  Phase 2 — Server startup:  {phase2_timing['server_startup_seconds']:.1f}s"
+        f"  Phase 2 — Server startup:  {phase2_timing.get('server_startup_seconds', 0.0):.1f}s{cached_p2_tag}"
     )
     print(
-        f"  Phase 2 — Agentic batch:   {phase2_timing['agentic_batch_seconds']:.1f}s"
+        f"  Phase 2 — Agentic batch:   {phase2_timing.get('agentic_batch_seconds', 0.0):.1f}s{cached_p2_tag}"
     )
     print(f"  Phase 3 — Judge:           {t_phase3:.1f}s")
     print(f"  Total:                     {timing['total_seconds']:.1f}s")

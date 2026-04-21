@@ -227,16 +227,42 @@ def save_phase_results(
     results: list,
     checkpoint_file: Path,
     phase_name: str = "unknown",
+    elapsed_time: Optional[float] = None,
+    extra_timing: Optional[dict] = None,
 ) -> None:
-    """Save phase results to a checkpoint file (atomic write)."""
+    """Save phase results to a checkpoint file (atomic write).
+
+    Args:
+        results: List of result dicts to persist.
+        checkpoint_file: Destination path for the JSON checkpoint.
+        phase_name: Human-readable label stored inside the checkpoint.
+        elapsed_time: Wall-clock seconds the phase batch took.
+        extra_timing: Additional timing values to store (e.g.
+            ``{"model_load_seconds": 45.2}`` or
+            ``{"server_startup_seconds": 12.1}``).
+            These are merged into the ``timing`` sub-dict alongside
+            *elapsed_time* so that future cache hits can recover all
+            timing without re-running the phase.
+    """
     checkpoint_file = Path(checkpoint_file)
     checkpoint_file.parent.mkdir(parents=True, exist_ok=True)
+
+    # Build the timing sub-dict from all provided values
+    timing_dict: dict = {}
+    if elapsed_time is not None:
+        timing_dict["elapsed_time"] = elapsed_time
+    if extra_timing:
+        timing_dict.update(extra_timing)
+
     data = {
         "phase": phase_name,
         "results": results,
         "count": len(results),
         "timestamp": datetime.now().isoformat(),
     }
+    if timing_dict:
+        data["timing"] = timing_dict
+
     temp_file = checkpoint_file.with_suffix(".tmp")
     with open(temp_file, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
@@ -244,8 +270,19 @@ def save_phase_results(
     print(f"Saved {len(results)} results for '{phase_name}' → {checkpoint_file}")
 
 
-def load_phase_results(checkpoint_file: Path) -> Optional[list]:
-    """Load phase results from checkpoint. Returns None if not found."""
+def load_phase_results(
+    checkpoint_file: Path,
+) -> Optional[Tuple[list, dict]]:
+    """Load phase results from checkpoint.
+
+    Returns:
+        ``(results, timing_dict)`` tuple when the checkpoint exists.
+        *timing_dict* contains keys such as ``"elapsed_time"``,
+        ``"model_load_seconds"``, ``"server_startup_seconds"``, etc.,
+        or ``{}`` for legacy checkpoints that predate timing recording.
+        Returns ``None`` when the checkpoint does not exist or cannot
+        be parsed.
+    """
     checkpoint_file = Path(checkpoint_file)
     if not checkpoint_file.exists():
         return None
@@ -253,8 +290,15 @@ def load_phase_results(checkpoint_file: Path) -> Optional[list]:
         with open(checkpoint_file, "r", encoding="utf-8") as f:
             data = json.load(f)
         results = data.get("results", [])
+        if isinstance(results, dict):
+            # Agentic incremental checkpoint format: {str(idx): result}
+            # This should not normally reach here, but guard defensively.
+            print(f"Warning: unexpected dict results in {checkpoint_file}, skipping.")
+            return None
+        # Use the nested timing dict; empty dict for pre-timing checkpoints.
+        timing_dict = data.get("timing", {})
         print(f"Loaded {len(results)} cached results from {checkpoint_file}")
-        return results
+        return results, timing_dict
     except (json.JSONDecodeError, IOError) as e:
         print(f"Warning: Error loading phase results: {e}")
         return None
