@@ -207,6 +207,8 @@ def phase1_offline_batch(config, eval_dataset, retriever_tool,
         trust_remote_code=model_cfg.get("trust_remote_code", True),
         dtype=model_cfg.get("dtype", "auto"),
         enforce_eager=model_cfg.get("enforce_eager", False),
+        quantization=model_cfg.get("quantization"),
+        kv_cache_dtype=model_cfg.get("kv_cache_dtype"),
     )
     t_load = time.time() - t_load
     print(f"Model loaded in {t_load:.1f}s")
@@ -443,6 +445,10 @@ def phase3_judge(config, all_outputs, evaluation_prompt, checkpoints_dir):
         dtype=model_cfg.get("dtype", "auto"),
         enforce_eager=eval_cfg.get("enforce_eager",
                                    model_cfg.get("enforce_eager", False)),
+        # Judge model uses its OWN quantization settings (eval_cfg), NOT the
+        # main model's, so FP8 is never accidentally applied to the judge.
+        quantization=eval_cfg.get("quantization"),
+        kv_cache_dtype=eval_cfg.get("kv_cache_dtype"),
     )
 
     sampling = SamplingParams(
@@ -693,6 +699,10 @@ def main():
                           model_cfg.get("max_model_len")),
             "dtype":
             model_cfg.get("dtype"),
+            "quantization":
+            model_cfg.get("quantization"),
+            "kv_cache_dtype":
+            model_cfg.get("kv_cache_dtype"),
             "enforce_eager":
             model_cfg.get("enforce_eager"),
             "temperature":
@@ -720,6 +730,9 @@ def main():
             "max_model_len": eval_cfg.get("max_model_len"),
             "temperature": eval_cfg.get("temperature"),
             "max_tokens": eval_cfg.get("max_tokens"),
+            # These will be null/absent when the judge has no quantization set
+            "quantization": eval_cfg.get("quantization"),
+            "kv_cache_dtype": eval_cfg.get("kv_cache_dtype"),
         },
     }
 

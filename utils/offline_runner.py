@@ -32,9 +32,11 @@ def create_offline_llm(
     dtype: str = "auto",
     disable_custom_all_reduce: bool = True,
     enforce_eager: bool = False,
+    quantization: Optional[str] = None,
+    kv_cache_dtype: Optional[str] = None,
 ) -> LLM:
     """Create a vLLM offline LLM instance for batch processing."""
-    return LLM(
+    kwargs: dict = dict(
         model=model_id,
         tensor_parallel_size=tensor_parallel_size,
         gpu_memory_utilization=gpu_memory_utilization,
@@ -44,6 +46,11 @@ def create_offline_llm(
         disable_custom_all_reduce=disable_custom_all_reduce,
         enforce_eager=enforce_eager,
     )
+    if quantization is not None:
+        kwargs["quantization"] = quantization
+    if kv_cache_dtype is not None:
+        kwargs["kv_cache_dtype"] = kv_cache_dtype
+    return LLM(**kwargs)
 
 
 def release_offline_llm(llm: LLM) -> None:

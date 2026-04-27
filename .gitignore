@@ -5,6 +5,7 @@ vectordb/
 doc/
 .venv/
 logs/
+tests/
 .gradio
 *pycache*
 .env
