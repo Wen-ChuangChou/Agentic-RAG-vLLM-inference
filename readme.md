@@ -1,12 +1,26 @@
-# **Agentic Retrieval-Augmented-Generation (RAG): AI Agent for self-query and query reformulation**
+# **Agentic RAG with Colocated vLLM Inference**
 
 ## **Project Description**
 
-This project implements and evaluates **Agentic Retrieval-Augmented Generation (RAG)**, comparing its performance against traditional RAG and standalone Large Language Models (LLMs) when answering technical questions about the Hugging Face ecosystem.
+This project compares the performance of **Agentic RAG**, traditional **RAG**, and **standalone LLM** systems when answering technical questions about the Hugging Face ecosystem.
 
-While traditional RAG systems are powerful, they follow a fixed retrieve-then-generate pattern. This project goes further by introducing an **agent-based approach** that enables dynamic decision-making, iterative query refinement, and adaptive tool use — addressing core limitations of basic RAG when dealing with complex or multi-step queries. The agent intelligently interacts with external knowledge sources, evaluates retrieved content, and refines its strategy based on outcomes, resulting in more accurate, robust, and contextually rich answers. This repository leverages the [smolagents](https://github.com/huggingface/smolagents) package to build the underlying agentic framework.
+All inference has been moved from remote API calls to a **GPU cluster with colocated vLLM serving**. The framework features both online (server) and offline (batch) vLLM inference within a unified cluster, engineered for **zero-egress data sovereignty**, localized compute efficiency, and high-throughput RAG workflows.
 
-![RAG_vs_Agentic_RAG](pics/RAG_vs_Agnetic.jpeg)
+<!-- TODO: Add architecture diagram here ![RAG_vs_Agentic_RAG](pics/RAG_vs_Agnetic.jpeg)-->
+
+While traditional RAG systems follow a fixed retrieve-then-generate pattern, this project introduces an **agent-based approach** that enables dynamic decision-making, iterative query refinement, and adaptive tool use. The agent intelligently interacts with external knowledge sources, evaluates retrieved content, and refines its strategy based on outcomes, resulting in more accurate, robust, and contextually rich answers. The agentic framework is built with [smolagents](https://github.com/huggingface/smolagents).
+
+
+
+### **Pipeline Architecture**
+
+The evaluation runs as a three-phase hybrid pipeline that maximises GPU utilisation on HPC:
+
+| Phase | Mode | What it does |
+|---|---|---|
+| **Phase 1** — Offline Batch | `vllm.LLM.generate()` | Standard RAG + Vanilla LLM inference (maximum throughput, zero HTTP overhead) |
+| **Phase 2** — Async Server | vLLM server + `asyncio` | Concurrent Agentic RAG — N agents query the vLLM server in parallel; continuous batching keeps GPU near 100% |
+| **Phase 3** — Offline Batch | `vllm.LLM.generate()` | LLM-as-judge evaluation of all answers |
 
 ### **Key Capabilities**
 
@@ -18,29 +32,29 @@ While traditional RAG systems are powerful, they follow a fixed retrieve-then-ge
 | **Multi-step Reasoning** | Chains together multiple retrieval and generation steps to answer complex questions. |
 | **Self-Correction & Backtracking** | If a generated answer is unsatisfactory, the agent devises and executes alternative retrieval strategies. |
 
+---
+
 ## **Installation**
 
 ### **Prerequisites**
 
 - Python **3.12+**
-- A [Gemini API key](https://aistudio.google.com/app/apikey) (free tier available) or [Blablador API key](https://helmholtz-blablador.fz-juelich.de/)
+- CUDA-capable GPU(s) (tested on NVIDIA H100)
+- [vLLM](https://github.com/vllm-project/vllm) (included in requirements)
 - Git
 
 ### **Steps**
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/Wen-ChuangChou/Agentic_RAG.git
-   cd Agentic_RAG
+   git clone https://github.com/Wen-ChuangChou/Agentic-RAG-vLLM-inference.git
+   cd Agentic-RAG-vLLM-inference
    ```
 
 2. **Create and activate a virtual environment** *(recommended)*
    ```bash
-   python -m venv venv
-   # Windows
-   venv\Scripts\activate
-   # macOS / Linux
-   source venv/bin/activate
+   python -m venv .venv
+   source .venv/bin/activate
    ```
 
 3. **Install dependencies**
@@ -48,36 +62,66 @@ While traditional RAG systems are powerful, they follow a fixed retrieve-then-ge
    pip install -r requirement.txt
    ```
 
-4. **Configure your API key**
-
-   Create a `.env` file in the project root and add:
-   ```env
-   GEMINI_API_KEY=your_api_key_here
-   Blablador_API_KEY=your_api_key_here
+4. **Download a model** *(if not already cached)*
+   ```bash
+   # Example: download a model to the HuggingFace cache
+   bash hpc/download_model.sh <model_id>
    ```
 
 ---
 
 ## **Usage**
 
-There are three main scripts to run the evaluation pipeline and visualize the results.
+### 1. Configure a Model Recipe
+
+Each model is configured via a YAML recipe in `recipes/`. A recipe controls the model, vLLM server, judge, async concurrency, and vector database settings:
+
+```bash
+ls recipes/
+# GLM-4.7-Flash.yaml  Llama-3.3-70B-Instruct.yaml  MiniMax-M2.7.yaml
+# Qwen3.5-122B-A10B-FP8.yaml  Qwen3.6-35B-A3B-FP8.yaml  ...
+```
+
+See [`recipes/Qwen3.5-122B-A10B-FP8.yaml`](recipes/Qwen3.5-122B-A10B-FP8.yaml) for a full example with comments.
 
 ---
 
-### 1. Run the Evaluation — `agentic_rag.py`
+### 2. Run the Evaluation Pipeline
 
-This is the core script. It evaluates and compares three QA systems (Agentic RAG, Standard RAG, and Vanilla LLM) on the [Hugging Face technical Q&A dataset](https://huggingface.co/datasets/m-ric/huggingface_doc_qa_eval), using an LLM-as-judge for scoring. Results are saved as JSON files in the `results/` directory, and checkpoints are written to `checkpoints/` so long runs can be safely resumed.
+#### **On an HPC cluster (recommended)**
+
+Submit the Slurm job, optionally specifying a recipe:
 
 ```bash
-python agentic_rag.py
+# Default recipe (GLM-4.7-Flash)
+sbatch hpc/run_agentic_rag.slurm
+
+# Custom recipe
+sbatch hpc/run_agentic_rag.slurm recipes/Qwen3.5-122B-A10B-FP8.yaml
+
+# Test mode — run on specific question IDs only
+sbatch hpc/run_agentic_rag.slurm recipes/Qwen3.5-122B-A10B-FP8.yaml --test-ids 4 12 20 49 56
 ```
 
-**What it does:**
-- Builds (or loads from cache) a FAISS vector database from the Hugging Face documentation corpus
-- Runs Agentic RAG, Standard RAG, and Vanilla LLM inference on the evaluation dataset
-- Scores each answer with an LLM judge and saves results to `results/<model_name>_vect<chunk_size>_t<temperature>.json`
+The Slurm script handles module loading, optional NVMe model staging for faster I/O, and environment variable setup.
 
-> The model name and chunk size are configurable inside `main()` via the `config` dictionary and the `model_name` variable.
+#### **Locally**
+
+```bash
+python agentic_rag.py --config recipes/GLM-4.7-Flash.yaml
+
+# Test mode — first 5 questions only
+python agentic_rag.py --config recipes/GLM-4.7-Flash.yaml --test 5
+```
+
+**What the pipeline does:**
+1. Builds (or loads from cache) a **FAISS vector database** from the Hugging Face documentation corpus
+2. **Phase 1:** Runs Standard RAG and Vanilla LLM via offline batch inference (`vllm.LLM`)
+3. **Phase 2:** Launches a vLLM server and runs concurrent Agentic RAG queries via `asyncio`
+4. **Phase 3:** Scores all answers with an LLM judge via offline batch inference
+5. Saves results to `results/<model_name>_vect<chunk_size>_t<temperature>.json`
+
+> All phases write checkpoints to `checkpoints/` so long runs can be safely resumed.
 
 **Vector database pipeline** (`utils/vectordb_utils.py`):
 
@@ -95,96 +139,102 @@ python agentic_rag.py
 
 ---
 
-### 2. Visualize Performance Scores — `visualize_rag_performance.py`
+### 3. Visualize Results
 
-Generates a grouped bar chart comparing the mean accuracy (%) of Agentic RAG, Standard RAG, and Vanilla LLM across all JSON result files found in the results directory. The plot is saved as `evaluation_scores.png`.
+#### Performance Scores
+
+Generates a grouped bar chart comparing the mean accuracy (%) of Agentic RAG, Standard RAG, and Vanilla LLM across all result files.
 
 ```bash
 python visualize_rag_performance.py
-# or specify a custom results directory:
 python visualize_rag_performance.py --results_dir path/to/results
 ```
 
 **Output:** `results/evaluation_scores.png`
 
----
+#### Score Distribution
 
-### 3. Visualize Score Distribution — `visualize_correct_portion.py`
-
-Generates a stacked bar chart showing the proportion of **Correct**, **Partially correct**, and **Wrong** answers for each system type and model. This gives a richer view of answer quality beyond simple accuracy. The plot is saved as `score_distribution.png`.
+Generates a stacked bar chart showing the proportion of **Correct**, **Partially correct**, and **Wrong** answers for each system type and model.
 
 ```bash
 python visualize_correct_portion.py
-# or specify a custom results directory:
 python visualize_correct_portion.py --results_dir path/to/results
 ```
 
 **Output:** `results/score_distribution.png`
+
+#### Inference Time Comparison
+
+Compares running time between remote API calls and local vLLM inference serving.
+
+```bash
+python visualize_time_comparison.py MiniMax-M2.7 Qwen3.5-122B Qwen3.6-35B
+```
+
+**Output:** `results/time_comparison.png`
 
 ---
 
 ## **Project Structure**
 
 ```
-RAG_paper/
+Agentic-RAG-vLLM-inference/
 │
-├── agentic_rag.py                  # Main evaluation script (Agentic RAG, Standard RAG, Vanilla LLM)
+├── agentic_rag.py                  # Main 3-phase evaluation pipeline
 ├── visualize_rag_performance.py    # Grouped bar chart of mean accuracy scores
 ├── visualize_correct_portion.py    # Stacked bar chart of score distribution
+├── visualize_time_comparison.py    # API vs vLLM inference time comparison
 ├── requirement.txt                 # Python dependencies
-├── .env                            # API keys (not tracked by git)
 │
-├── utils/                          # Helper modules
+├── recipes/                        # Model configuration recipes (YAML)
+│   ├── GLM-4.7-Flash.yaml
+│   ├── Llama-3.3-70B-Instruct.yaml
+│   ├── MiniMax-M2.7.yaml
+│   ├── Qwen3.5-122B-A10B-FP8.yaml
+│   └── Qwen3.6-35B-A3B-FP8.yaml
+│
+├── utils/                          # Core modules
 │   ├── agent_tools.py              # RetrieverTool for the smolagents CodeAgent
-│   ├── blablador_helper.py         # Blablador LLM API wrapper
+│   ├── async_agentic_runner.py     # Concurrent agentic RAG via asyncio + threading
+│   ├── model_factory.py            # Model creation factory
+│   ├── offline_runner.py           # Offline batch inference via vllm.LLM
+│   ├── vllm_server_manager.py      # vLLM server lifecycle context manager (Phase 2)
 │   ├── checkpoint_runner.py        # Checkpointing logic for long evaluations
 │   ├── results_manager.py          # Save / load evaluation results to JSON
-│   └── vectordb_utils.py           # FAISS vector database creation & caching (gte-small embeddings, cosine distance, parallel splitting, persistent cache)
+│   └── vectordb_utils.py           # FAISS vector database (gte-small embeddings, parallel build, persistent cache)
 │
-├── prompts/                        # YAML prompt templates
-│   ├── gemini_agent_system_prompt.yaml
-│   ├── guide_agent_system_prompt.yaml
-│   └── evaluation_prompt.yaml
+├── hpc/                            # HPC / Slurm scripts
+│   ├── run_agentic_rag.slurm       # Main Slurm job script (3-phase pipeline)
+│   ├── launch_vllm_server.sh       # Standalone vLLM server launcher
+│   ├── launch_vllm_multinode.sh    # Multi-node vLLM server launcher
+│   ├── download_model.sh           # Model download helper
+│   ├── setup_vllm_env.sh           # vLLM environment setup
+│   └── test_phase1.slurm           # Phase 1 unit test job
 │
-├── results/                        # Evaluation outputs (JSON + plots)
-│   ├── *.json                      # Per-model evaluation results
-│   ├── evaluation_scores.png       # Grouped bar chart
-│   └── score_distribution.png      # Stacked bar chart
-│
-├── checkpoints/                    # Intermediate checkpoints for resumable runs
-├── vectordb/                       # Cached FAISS vector database
-└── doc/                            # Additional documentation assets
+└── prompts/                        # YAML prompt templates
+    ├── gemini_agent_system_prompt.yaml
+    ├── guide_agent_system_prompt.yaml
+    └── evaluation_prompt.yaml
+
 ```
 
-
+---
 
 ## **Results**
 
-Performance was evaluated using the [Hugging Face technical Q&A dataset](https://huggingface.co/datasets/m-ric/huggingface_doc_qa_eval). The results demonstrate that the Agentic RAG approach consistently outperforms standard RAG and standalone LLMs.
+Performance was evaluated using the [Hugging Face technical Q&A dataset](https://huggingface.co/datasets/m-ric/huggingface_doc_qa_eval) with all inference running on a local GPU cluster via vLLM.
 
-### **Performance Comparison**
+### **Inference Time: API vs Local vLLM**
 
-![Evaluation Scores](pics/evaluation_scores.png)
+![Time Comparison](pics/time_comparison.png)
 
-The chart above shows that **Agentic RAG performance is consistently better than standard RAG and Vanilla LLM** across all evaluated LLMs.
+The API vs. vLLM results show that system design, not just modeling approach, determines whether advanced pipelines are viable. Under remote APIs, latency is dominated by per-call overhead, so Agentic RAG becomes prohibitively slow due to many sequential requests. In contrast, on a local vLLM server, the concurrent Agentic RAG setup—multiple agents issuing requests in parallel—combined with continuous batching keeps GPU utilization near saturation and amortizes decoding costs across requests. This collapses end-to-end latency by an order of magnitude and makes multi-step reasoning pipelines not only feasible but efficient.
 
-### **Score Distribution and Model Strength**
+For Standard RAG and Vanilla LLM, the use of offline batching further highlights this systems effect. While APIs penalize even modest multi-call workflows, local batching executes large query sets in parallel with minimal overhead, bringing their runtimes close to the lower bound of pure model compute. As a result, the latency gap between Standard RAG and Vanilla LLM nearly disappears locally, while Agentic RAG remains somewhat higher due to additional steps—but still within a practical range. Overall, we demonstrate that concurrency + batching (either in agentic, RAG, or Vanilla LLM) are the key enablers, transforming both simple and complex pipelines from API-limited latency regimes into compute-efficient, high-throughput local systems.
 
-![Score Distribution](pics/score_distribution.png)
+---
 
-The score distribution highlights that stronger models, such as **Qwen 3.5**, not only answer more questions correctly but also retrieve more accurate answers, resulting in fewer "partially correct" responses compared to other models.
+## **References**
 
-## **Future Improvements**
-
-To further enhance the performance, efficiency, and security of this Agentic RAG system, the following areas are identified for future development:
-
-1. **Comprehensive Agent Telemetry** : System prompts are a critical factor in agentic performance. Implementing a robust telemetry system would allow for granular monitoring of agent behavior, enabling systematic comparison of different system prompts and reasoning patterns to identify the most effective configurations.
-
-2. **Self-Refining Agent Prompting via Reinforcement Learning** : Leveraging Reinforcement Learning (RL) to allow an agent to iteratively refine its own system prompts. The goal is to optimize for factual accuracy while ensuring the agent maintains its existing capabilities. This approach can lead to more efficient retrieval strategies, reducing the number of necessary steps and improving alignment with complex task requirements.
-
-3. **Private LLM Serving with vLLM** : Transitioning from external APIs (like Gemini or Blablador) to local or private HPC-hosted models using **vLLM**. This would significantly improve inference speeds and, more importantly, ensure data privacy by keeping sensitive database information within a secure, private GPU computing cluster—a crucial requirement for production-grade applications.
-
-## **Reference:**
-
-1. [Hugging Face Agentic RAG Cookbook](https://huggingface.co/learn/cookbook/agent_rag).
-2. [Blablador](https://helmholtz-blablador.fz-juelich.de/).
+1. [vLLM — Easy, fast, and cheap LLM serving](https://github.com/vllm-project/vllm)
+2. [smolagents — Hugging Face agent framework](https://github.com/huggingface/smolagents)

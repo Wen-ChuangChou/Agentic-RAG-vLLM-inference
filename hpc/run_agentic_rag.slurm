@@ -22,7 +22,7 @@
 #SBATCH --gpus-per-node=4
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=256G
-#SBATCH --time=00:30:00
+#SBATCH --time=00:45:00
 #SBATCH --partition=capella
 #SBATCH --mail-user=wen-chuang.chou@tu-dresden.de
 #SBATCH --mail-type=ALL
