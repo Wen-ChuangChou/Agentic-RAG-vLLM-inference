@@ -17,8 +17,10 @@ model:
   # phase2_max_model_len: 131072
   phase2_max_model_len: 65536
   dtype: "auto"
+  # quantization: "fp8"
+  # kv_cache_dtype: "fp8"
   trust_remote_code: true
-  temperature: 0.2
+  temperature: 1
   max_tokens: 4096
   enforce_eager: false                       # Workaround for Hopper TMA descriptor crash
 
@@ -28,6 +30,7 @@ server:
   api_key: "ai4all"
   host: "0.0.0.0"
   extra_args: []
+  # extra_args: ["--quantization", "fp8", "--kv-cache-dtype", "fp8"]
   # extra_args: ["--enforce-eager"]        # Workaround for Hopper TMA descriptor crash in FlashAttention MLA
 
 # === Evaluation judge model (Phase 3) ===
@@ -42,8 +45,8 @@ evaluation:
 async:
   concurrency: 16                          # Number of concurrent agentic queries
   checkpoint_interval: 5                    # Save checkpoint every N completions
-  planning_interval: 3                      # Number of steps before replanning
-  max_steps: 8                             # Maximum execution steps per agent
+  planning_interval: 5                      # Number of steps before replanning
+  max_steps: 30                             # Maximum execution steps per agent
 
 # === Vector DB config ===
 vectordb:
