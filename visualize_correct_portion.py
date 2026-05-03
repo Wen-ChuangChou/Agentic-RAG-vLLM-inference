@@ -101,8 +101,20 @@ def plot_stacked_bars(results_dir, rows):
 
     df = pd.DataFrame(rows)
 
-    # Each unique source (filename stem) is one experiment / group
-    sources = list(dict.fromkeys(df["source"]))
+    # Calculate Agentic RAG 'Correct' score for each source to sort the sources
+    source_scores = {}
+    for src in df["source"].unique():
+        agentic_row = df[(df["source"] == src)
+                         & (df["system_type"] == "Agentic RAG")]
+        if not agentic_row.empty:
+            source_scores[src] = agentic_row.iloc[0]["Correct"]
+        else:
+            source_scores[src] = -1
+
+    # Sort sources based on Agentic RAG 'Correct' score (descending)
+    sources = sorted(df["source"].unique(),
+                     key=lambda x: source_scores[x],
+                     reverse=True)
     system_types = list(dict.fromkeys(df["system_type"]))
 
     n_sources = len(sources)

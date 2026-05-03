@@ -68,15 +68,32 @@ def plot_scores(results_dir, scores_list):
 
     df = pd.DataFrame(scores_list)
 
-    # Append superscript star(s) for duplicate model names
+    # Append superscript star(s) for duplicate model names and format long names
     seen = {}
     new_names = []
     for name in df["model_name"]:
         seen[name] = seen.get(name, 0) + 1
         if seen[name] > 1:
-            new_names.append(name + "*" * (seen[name] - 1))
+            formatted_name = name + "*" * (seen[name] - 1)
         else:
-            new_names.append(name)
+            formatted_name = name
+
+        if len(formatted_name.replace("-", "")) > 12 and "-" in formatted_name:
+            parts = formatted_name.split("-")
+            best_diff = float('inf')
+            best_split = 1
+            for i in range(1, len(parts)):
+                part1 = "-".join(parts[:i])
+                part2 = "-".join(parts[i:])
+                diff = abs(
+                    len(part1.replace("-", "")) - len(part2.replace("-", "")))
+                if diff < best_diff:
+                    best_diff = diff
+                    best_split = i
+            formatted_name = "-".join(parts[:best_split]) + "-\n" + "-".join(
+                parts[best_split:])
+
+        new_names.append(formatted_name)
     df["model_name"] = new_names
 
     df.set_index("model_name", inplace=True)
@@ -86,6 +103,10 @@ def plot_scores(results_dir, scores_list):
         "standard": "Vanilla LLM"
     },
               inplace=True)
+
+    # Sort by Agentic RAG score in descending order
+    if "Agentic RAG" in df.columns:
+        df.sort_values(by="Agentic RAG", ascending=False, inplace=True)
 
     # Set background to black
     plt.style.use('dark_background')
@@ -101,11 +122,11 @@ def plot_scores(results_dir, scores_list):
     # Plot bars
     ax = df.plot(kind="bar",
                  ax=ax,
-                 rot=45,
+                 rot=0,
                  color=colors,
                  edgecolor='white',
                  linewidth=1.5,
-                 width=0.8)
+                 width=0.6)
 
     # Add small spaces between bars in the same group
     for container in ax.containers:
@@ -120,7 +141,7 @@ def plot_scores(results_dir, scores_list):
                  fontsize=14,
                  color='white',
                  pad=20)
-    ax.set_xlabel("Model Name", fontsize=12, color='white')
+    ax.set_xlabel("")
 
     # Y-axis formatting to show Percentages
     ax.set_ylim(0, 105)
@@ -138,6 +159,10 @@ def plot_scores(results_dir, scores_list):
     for spine in ax.spines.values():
         spine.set_visible(False)
 
+    # Add a thin horizontal grid for readability
+    ax.yaxis.grid(True, linestyle="--", alpha=0.15, color="white")
+    ax.set_axisbelow(True)
+
     # Add bar labels on top
     for container in ax.containers:
         labels = [
@@ -148,14 +173,14 @@ def plot_scores(results_dir, scores_list):
                      labels=labels,
                      padding=5,
                      color='white',
-                     fontsize=10,
+                     fontsize=8.5,
                      fontweight='bold',
                      rotation=45)
 
     legend = plt.legend(bbox_to_anchor=(0.7 + len(df) * 0.05, 1.05),
                         loc='upper left',
                         frameon=False,
-                        fontsize=12)
+                        fontsize=10)
     plt.setp(legend.get_texts(), color='white')
     if legend.get_title():
         plt.setp(legend.get_title(), color='white')
