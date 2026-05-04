@@ -322,7 +322,7 @@ async def run_agentic_batch(
     concurrency: int = 16,
     checkpoint_file: Optional[Path] = None,
     checkpoint_interval: int = 5,
-    agent_timeout: float = 180.0,
+    agent_timeout: float = 360.0,
     max_retries: int = 2,
     planning_interval: int = 3,
     max_steps: int = 12,
