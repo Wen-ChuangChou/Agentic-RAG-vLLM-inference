@@ -6,7 +6,7 @@ This project compares the performance of **Agentic RAG**, traditional **RAG**, a
 
 All inference has been moved from remote API calls to a **GPU cluster with colocated vLLM serving**. The framework features both online (server) and offline (batch) vLLM inference within a unified cluster, engineered for **zero-egress data sovereignty**, localized compute efficiency, and high-throughput RAG workflows.
 
-<!-- TODO: Add architecture diagram here ![RAG_vs_Agentic_RAG](pics/RAG_vs_Agnetic.jpeg)-->
+![API vLLM comparison](pics/api_vllm_note.png)
 
 While traditional RAG systems follow a fixed retrieve-then-generate pattern, this project introduces an **agent-based approach** that enables dynamic decision-making, iterative query refinement, and adaptive tool use. The agent intelligently interacts with external knowledge sources, evaluates retrieved content, and refines its strategy based on outcomes, resulting in more accurate, robust, and contextually rich answers. The agentic framework is built with [smolagents](https://github.com/huggingface/smolagents).
 
