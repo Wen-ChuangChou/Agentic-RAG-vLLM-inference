@@ -9,9 +9,8 @@ utilisation.
 smolagents CodeAgent.run() is synchronous, so each call is wrapped in
 asyncio.to_thread() and guarded by a semaphore to cap concurrency.
 
-Resilience: each agent is guarded by a wall-clock timeout.  If the model
-enters a degenerate repetition loop (GPU goes idle, no tokens produced),
-the agent is killed and a fresh one retries the same question.
+Resilience: each agent has a wall-clock deadline. Cancellation is cooperative:
+an in-flight HTTP call finishes or times out before its worker is retried.
 """
 
 import asyncio
@@ -28,24 +27,32 @@ from tqdm import tqdm
 from utils.agent_tools import RetrieverTool
 
 
+class AgentCancelled(BaseException):
+    """Exit a worker without CodeAgent treating cancellation as a model error."""
+
+
 class CancellableOpenAIServerModel(OpenAIServerModel):
     """An OpenAI server model that can be safely terminated during timeout."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.cancelled = False
+        self.cancel_event = threading.Event()
+
+    def generate(self, *args, **kwargs):
+        if self.cancel_event.is_set():
+            raise AgentCancelled()
+        try:
+            answer = super().generate(*args, **kwargs)
+        except Exception:
+            if self.cancel_event.is_set():
+                raise AgentCancelled() from None
+            raise
+        if self.cancel_event.is_set():
+            raise AgentCancelled()
+        return answer
 
     def __call__(self, *args, **kwargs):
-        if self.cancelled:
-            import sys
-            sys.exit(0)
-        try:
-            return super().__call__(*args, **kwargs)
-        except Exception:
-            if self.cancelled:
-                import sys
-                sys.exit(0)
-            raise
+        return self.generate(*args, **kwargs)
 
 
 class RetryableCodeAgent(CodeAgent):
@@ -83,7 +90,9 @@ def _create_agent(model_config: dict,
         temperature=model_config.get("temperature", 0.2),
         # HTTP-level timeout (seconds) per API call.  Ensures threads exit
         # naturally when vLLM hangs instead of becoming unkillable zombies.
-        client_kwargs={"timeout": 90.0},
+        client_kwargs={"timeout": model_config.get("request_timeout", 90.0),
+                       "max_retries": 0},
+        retry=False,
     )
     retriever = RetrieverTool(vectordb)
     agent = RetryableCodeAgent(
@@ -199,10 +208,8 @@ class AsyncAgenticRunner:
                                 semaphore: asyncio.Semaphore) -> None:
         """Process a single question with an agent (runs in a thread).
 
-        If the agent exceeds ``agent_timeout`` seconds (likely stuck in a
-        degenerate repetition loop), it is killed and a fresh agent retries
-        the same question.  Up to ``max_retries`` retry attempts are made
-        before recording a timeout error.
+        After the deadline, wait for the cancelled worker before retrying so
+        timed-out threads cannot exceed the configured concurrency limit.
         """
         async with semaphore:
             example = self.eval_dataset[idx]
@@ -212,20 +219,28 @@ class AsyncAgenticRunner:
             last_error = None
             for attempt in range(1 + self.max_retries):
 
-                agent_ref = []
+                cancel_event = threading.Event()
 
-                def _run_agent():
+                def _run_agent(cancel_event=cancel_event):
                     agent = _create_agent(
                         self.model_config,
                         self.vectordb,
                         planning_interval=self.planning_interval,
                         max_steps=self.max_steps)
-                    agent_ref.append(agent)
-                    return agent.run(enhanced)
+                    agent.model.cancel_event = cancel_event
+                    try:
+                        if cancel_event.is_set():
+                            return None
+                        return agent.run(enhanced)
+                    except AgentCancelled:
+                        return None
+                    finally:
+                        agent.model.client.close()
 
+                worker = asyncio.create_task(asyncio.to_thread(_run_agent))
                 try:
                     answer = await asyncio.wait_for(
-                        asyncio.to_thread(_run_agent),
+                        asyncio.shield(worker),
                         timeout=self.agent_timeout,
                     )
                     result = {
@@ -238,12 +253,10 @@ class AsyncAgenticRunner:
                     return  # success — exit retry loop
 
                 except asyncio.TimeoutError:
-                    if agent_ref and hasattr(agent_ref[0], "model"):
-                        llm_model = agent_ref[0].model
-                        llm_model.cancelled = True
-                        if hasattr(llm_model, "client") and hasattr(
-                                llm_model.client, "close"):
-                            llm_model.client.close()
+                    cancel_event.set()
+                    # Closing httpx from another thread causes connection errors
+                    # and does not reliably interrupt a blocking request.
+                    await asyncio.gather(worker, return_exceptions=True)
 
                     last_error = "Agent timed out"
                     remaining = self.max_retries - attempt
@@ -255,6 +268,11 @@ class AsyncAgenticRunner:
                         print(f"\nTimeout at question {idx} "
                               f"(>{self.agent_timeout:.0f}s), "
                               f"no retries left")
+
+                except asyncio.CancelledError:
+                    cancel_event.set()
+                    await asyncio.gather(worker, return_exceptions=True)
+                    raise
 
                 except Exception as e:
                     last_error = str(e)
@@ -338,9 +356,8 @@ async def run_agentic_batch(
         concurrency: Max simultaneous agentic queries.
         checkpoint_file: Path for resumable checkpointing.
         checkpoint_interval: Save checkpoint every N completions.
-        agent_timeout: Max wall-clock seconds per agent attempt.  If
-            exceeded the agent is killed (likely stuck in a degenerate
-            repetition loop) and retried.
+        agent_timeout: Deadline per attempt; cancellation then waits for the
+            current HTTP/tool call to finish before retrying.
         max_retries: Number of retry attempts after a timeout or error
             before recording the question as failed.
 

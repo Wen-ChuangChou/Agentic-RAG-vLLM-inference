@@ -10,6 +10,7 @@ import signal
 import subprocess
 import sys
 import time
+from pathlib import Path
 import urllib.error
 import urllib.request
 from typing import List, Optional
@@ -43,6 +44,8 @@ class VLLMServerManager:
         health_timeout: int = 600,
         health_poll_interval: int = 10,
         served_model_name: Optional[str] = None,
+        log_dir: Optional[str] = None,
+        profile_imports: bool = False,
     ):
         self.model_id = model_id
         self.served_model_name = served_model_name or model_id
@@ -58,6 +61,10 @@ class VLLMServerManager:
         self.extra_args = extra_args or []
         self.health_timeout = health_timeout
         self.health_poll_interval = health_poll_interval
+        self.profile_imports = profile_imports
+        self.log_dir = Path(log_dir or f"logs/vllm-{os.environ.get('SLURM_JOB_ID', os.getpid())}-{port}")
+        self.stdout_path = self.log_dir / "server.out"
+        self.stderr_path = self.log_dir / "server.err"
 
         self._process: Optional[subprocess.Popen] = None
         self.url = f"http://localhost:{port}/v1"
@@ -70,6 +77,7 @@ class VLLMServerManager:
         """Build the ``python -m vllm.entrypoints.openai.api_server`` cmd."""
         cmd = [
             sys.executable,
+            *(["-X", "importtime"] if self.profile_imports else []),
             "-m", "vllm.entrypoints.openai.api_server",
             "--model", self.model_id,
             "--served-model-name", self.served_model_name,
@@ -101,14 +109,15 @@ class VLLMServerManager:
         print(f"Starting vLLM server: {self.model_id} on port {self.port}")
         print(f"  Command: {' '.join(cmd[:8])} ...")
 
-        self._process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            # Create a new process group so we can kill the entire tree
-            preexec_fn=os.setsid,
-        )
+        # Unread PIPEs eventually fill and block the API server in a log write.
+        # Files remain available after shutdown and do not require a drain thread.
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+        with self.stdout_path.open("ab") as stdout, self.stderr_path.open("ab") as stderr:
+            self._process = subprocess.Popen(
+                cmd, stdout=stdout, stderr=stderr, start_new_session=True,
+            )
         print(f"  PID: {self._process.pid}")
+        print(f"  Server logs: {self.log_dir}")
 
     def wait_for_health(self) -> None:
         """Block until the ``/health`` endpoint returns HTTP 200."""
@@ -123,10 +132,10 @@ class VLLMServerManager:
             # Check if the process died
             if self._process.poll() is not None:
                 stderr = ""
-                if self._process.stderr:
-                    stderr = self._process.stderr.read().decode(
-                        errors="replace"
-                    )
+                if self.stderr_path.exists():
+                    with self.stderr_path.open("rb") as log:
+                        log.seek(max(0, log.seek(0, 2) - 2000))
+                        stderr = log.read().decode(errors="replace")
                 raise RuntimeError(
                     f"vLLM server exited unexpectedly "
                     f"(code {self._process.returncode}).\n"
@@ -155,7 +164,8 @@ class VLLMServerManager:
         # Timed out
         self.stop()
         raise TimeoutError(
-            f"vLLM server not healthy after {self.health_timeout}s"
+            f"vLLM server not healthy after {self.health_timeout}s. "
+            f"Inspect {self.stdout_path} and {self.stderr_path} for startup progress."
         )
 
     def stop(self) -> None:
@@ -230,7 +240,11 @@ class VLLMServerManager:
 
     def __enter__(self):
         self.start()
-        self.wait_for_health()
+        try:
+            self.wait_for_health()
+        except BaseException:
+            self.stop()
+            raise
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
