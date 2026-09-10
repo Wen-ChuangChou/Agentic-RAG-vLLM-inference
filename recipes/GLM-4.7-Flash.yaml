@@ -26,6 +26,7 @@ model:
 
 # === vLLM server settings (Phase 2 only) ===
 server:
+  health_timeout: 2400                      # Cold startup took ~940s in validation
   port: 8000
   api_key: "ai4all"
   host: "0.0.0.0"
