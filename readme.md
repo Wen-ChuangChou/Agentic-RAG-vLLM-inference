@@ -42,6 +42,7 @@ The evaluation runs as a three-phase hybrid pipeline that maximises GPU utilisat
 - CUDA-capable GPU(s) (tested on NVIDIA H100)
 - [vLLM](https://github.com/vllm-project/vllm) (included in requirements)
 - Git
+- uv
 
 ### **Steps**
 
@@ -59,7 +60,7 @@ The evaluation runs as a three-phase hybrid pipeline that maximises GPU utilisat
 
 3. **Install dependencies**
    ```bash
-   pip install -r requirement.txt
+   uv pip install -r requirement.txt
    ```
 
 4. **Download a model** *(if not already cached)*
@@ -103,7 +104,38 @@ sbatch hpc/run_agentic_rag.slurm recipes/Qwen3.5-122B-A10B-FP8.yaml
 sbatch hpc/run_agentic_rag.slurm recipes/Qwen3.5-122B-A10B-FP8.yaml --test-ids 4 12 20 49 56
 ```
 
-The Slurm script handles module loading, optional NVMe model staging for faster I/O, and environment variable setup.
+The Slurm script handles module loading, optional local staging, and environment variable setup. Submit from the repository root.
+
+#### **Use node-local storage on HPC**
+
+The following options independently control what is copied to a job-specific directory under `/tmp`. Both are disabled by default.
+
+| Option | What uses local storage |
+|---|---|
+| `--local-env` | A copy of `.venv`, plus fresh FlashInfer, vLLM, TorchInductor, and Triton compilation caches. All three phases and the vLLM server use the copied Python environment. |
+| `VLLM_USE_NVME=true` | Copies of the main and judge model weights, resolved from explicit model paths or the existing Hugging Face cache. |
+
+Place `--local-env` **before the recipe path**. Set `VLLM_USE_NVME=true` **before `sbatch`**:
+
+```bash
+# Local Python environment and compilation caches; weights stay at their original paths
+sbatch hpc/run_agentic_rag.slurm --local-env recipes/Qwen3.6-35B-A3B-FP8.yaml
+
+# Local model weights only
+VLLM_USE_NVME=true sbatch hpc/run_agentic_rag.slurm recipes/Qwen3.6-35B-A3B-FP8.yaml
+
+# Local Python environment, compilation caches, and model weights together
+VLLM_USE_NVME=true sbatch --time=01:00:00 hpc/run_agentic_rag.slurm \
+  --local-env recipes/Qwen3.6-35B-A3B-FP8.yaml
+
+# The same setup with selected questions
+VLLM_USE_NVME=true sbatch --time=01:00:00 hpc/run_agentic_rag.slurm \
+  --local-env recipes/Qwen3.6-35B-A3B-FP8.yaml --test-ids 4 20 43 49
+```
+
+Staging copies files; it leaves the original environment and weights intact. Code, the vector database, logs, checkpoints, and results remain in the workspace. If no local model source is found, weight staging is skipped and normal model resolution applies. `VLLM_LOCAL_ENV=true` can also enable environment staging instead of the `--local-env` flag.
+
+Local Python staging reduces import delays caused by slow shared-filesystem access. Job-local compilation caches prevent reuse of build files containing an earlier job's temporary paths. Allow time for copying and fresh kernel compilation as well as all three evaluation phases; the one-hour example is not a runtime guarantee. The main script removes its temporary environment, caches, and staged weights on normal exit or a caught setup failure, while preserving workspace outputs. Forced termination such as `SIGKILL` can bypass cleanup.
 
 #### **Locally**
 

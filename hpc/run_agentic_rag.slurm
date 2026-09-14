@@ -10,6 +10,7 @@
 # Usage:
 #   sbatch hpc/run_agentic_rag.slurm
 #   sbatch hpc/run_agentic_rag.slurm recipes/other-model.yaml
+#   sbatch hpc/run_agentic_rag.slurm --local-env recipes/Qwen3.6-35B-A3B-FP8.yaml
 #   sbatch hpc/run_agentic_rag.slurm --test-ids 4 12 20 49 56
 #   VLLM_MODEL_PATH=/path/to/model sbatch hpc/run_agentic_rag.slurm
 #============================================================================
@@ -28,9 +29,18 @@
 #SBATCH --mail-type=ALL
 #SBATCH --licenses=cat
 
+set -eo pipefail
+cd "${SLURM_SUBMIT_DIR:-$PWD}"
+START_TIME=$(date +%s)
+
 # ==========================================================================
 # Configuration (override via environment variables)
 # ==========================================================================
+USE_LOCAL_ENV="${VLLM_LOCAL_ENV:-false}"
+if [[ "${1:-}" == "--local-env" ]]; then
+    USE_LOCAL_ENV=true
+    shift
+fi
 # Handle optional config file as first argument
 if [[ $# -gt 0 && ! $1 =~ ^- ]]; then
     RAG_CONFIG="$1"
@@ -42,16 +52,40 @@ fi
 # Extract model names from the YAML config (or fallback to env vars)
 # This will be done in the Environment setup section after loading python!
 
-# NVMe local staging — enabled by default for faster model loading
+# Model-weight staging is separate from Python-environment staging.
 USE_NVME="${VLLM_USE_NVME:-false}"
-NVME_MOUNT="/tmp"
+RAG_JOB_TMP=$(mktemp -d "/tmp/agentic-rag-${SLURM_JOB_ID:?Submit with sbatch}-XXXXXX")
+NVME_MOUNT="${RAG_JOB_TMP}"
+cleanup_job_tmp() {
+    if [[ -d "${RAG_JOB_TMP}" ]]; then
+        echo "Removing job-local files: ${RAG_JOB_TMP}"
+        rm -rf -- "${RAG_JOB_TMP}"
+    fi
+}
+trap cleanup_job_tmp EXIT
 
 # ==========================================================================
 # Environment setup
 # ==========================================================================
 module purge
 module load release/25.06 GCCcore/13.3.0 Python/3.12.3 CUDA/13.0.0
-source .venv/bin/activate
+RAG_PYTHON="${PWD}/.venv/bin/python"
+if [[ "${USE_LOCAL_ENV}" == "true" ]]; then
+    # Cached build files can contain an earlier job's /tmp source paths.
+    # Isolate all compilation caches before importing vLLM or FlashInfer.
+    export FLASHINFER_WORKSPACE_BASE="${RAG_JOB_TMP}"
+    export VLLM_CACHE_ROOT="${RAG_JOB_TMP}/cache/vllm"
+    export TORCHINDUCTOR_CACHE_DIR="${RAG_JOB_TMP}/cache/torchinductor"
+    export TRITON_CACHE_DIR="${RAG_JOB_TMP}/cache/triton"
+    mkdir -p "${VLLM_CACHE_ROOT}" "${TORCHINDUCTOR_CACHE_DIR}" "${TRITON_CACHE_DIR}"
+    python -u hpc/stage_python_env.py .venv "${RAG_JOB_TMP}/venv"
+    RAG_PYTHON="${RAG_JOB_TMP}/venv/bin/python"
+fi
+# Do not source the copied activate script: it contains the old absolute path.
+export VIRTUAL_ENV="${RAG_PYTHON%/bin/python}"
+export PATH="${VIRTUAL_ENV}/bin:${PATH}"
+echo "Pipeline Python: ${RAG_PYTHON}"
+echo "Job-local files: ${RAG_JOB_TMP}"
 
 # Now that Python + PyYAML is available, extract models from config
 MODEL_NAME="${VLLM_MODEL:-$(python -c "import yaml; print(yaml.safe_load(open('${RAG_CONFIG}'))['model']['model_id'])")}"
@@ -62,7 +96,6 @@ JUDGE_MODEL_PATH="${VLLM_JUDGE_MODEL_PATH:-$(python -c "import yaml; print(yaml.
 
 mkdir -p logs
 
-START_TIME=$(date +%s)
 echo "============================================================"
 echo " Hybrid Agentic RAG Pipeline"
 echo "============================================================"
@@ -74,6 +107,7 @@ echo " Model:             ${MODEL_NAME}"
 echo " Judge:             ${JUDGE_MODEL}"
 echo " Config:            ${RAG_CONFIG}"
 echo " NVMe staging:      ${USE_NVME}"
+echo " Local Python env:  ${USE_LOCAL_ENV}"
 echo "============================================================"
 echo ""
 
@@ -173,8 +207,8 @@ echo " Launching Python pipeline"
 echo "============================================================"
 echo ""
 
-srun python agentic_rag.py --config "${RAG_CONFIG}" "$@"
-EXIT_CODE=$?
+EXIT_CODE=0
+srun "${RAG_PYTHON}" -u agentic_rag.py --config "${RAG_CONFIG}" "$@" || EXIT_CODE=$?
 
 # ==========================================================================
 # Cleanup & Timing report
@@ -182,22 +216,10 @@ EXIT_CODE=$?
 
 echo ""
 echo "--- Cleanup ---"
-# Clean up NVMe staged models and logs if they exist in /tmp
-if [ -d "${NVME_MOUNT}/vllm_models" ]; then
-    echo "Removing staged models from NVMe SSD (${NVME_MOUNT}/vllm_models) ..."
-    rm -rf "${NVME_MOUNT}/vllm_models"
-fi
-
-if [ -f "${NVME_MOUNT}/vllm_server.out" ] || [ -f "${NVME_MOUNT}/vllm_server.err" ]; then
-    echo "Removing vLLM server logs from NVMe SSD (${NVME_MOUNT}) ..."
-    rm -f "${NVME_MOUNT}/vllm_server.out" "${NVME_MOUNT}/vllm_server.err"
-fi
-
-# Also clean up the local tmp directory used for logs by default in the python code
-if [ -d "tmp" ]; then
-    echo "Removing local tmp/ directory ..."
-    rm -rf tmp
-fi
+# Remove only this job's environment, caches, and optionally staged models.
+# Server diagnostics remain under logs/, and checkpoints/results stay persistent.
+cleanup_job_tmp
+trap - EXIT
 echo "Cleanup complete."
 echo ""
 

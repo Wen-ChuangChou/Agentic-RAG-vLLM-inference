@@ -344,6 +344,10 @@ def phase2_agentic(config, eval_dataset, prompt_config, vectordb,
             trust_remote_code=model_cfg.get("trust_remote_code", True),
             enable_prefix_caching=True,
             extra_args=server_cfg.get("extra_args", []),
+            host=server_cfg.get("host", "0.0.0.0"),
+            log_dir=server_cfg.get("log_dir"),
+            health_timeout=server_cfg.get("health_timeout", 600),
+            profile_imports=server_cfg.get("profile_imports", False),
     ) as server:
         t_server_ready = time.time() - t_server_start
         print(f"vLLM server ready in {t_server_ready:.1f}s")
@@ -354,6 +358,7 @@ def phase2_agentic(config, eval_dataset, prompt_config, vectordb,
             "api_key": api_key,
             "max_tokens": model_cfg.get("max_tokens", 16384),
             "temperature": model_cfg.get("temperature", 0.2),
+            "request_timeout": async_cfg.get("request_timeout", 90.0),
         }
 
         concurrency = async_cfg.get("concurrency", 16)
@@ -373,6 +378,8 @@ def phase2_agentic(config, eval_dataset, prompt_config, vectordb,
                 checkpoint_interval=ckpt_interval,
                 planning_interval=planning_interval,
                 max_steps=max_steps,
+                agent_timeout=async_cfg.get("agent_timeout", 360.0),
+                max_retries=async_cfg.get("max_retries", 2),
             ))
         t_agentic = time.time() - t_agentic
         print(f"Agentic batch completed in {t_agentic:.1f}s")
