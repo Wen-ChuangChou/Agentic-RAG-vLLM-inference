@@ -13,6 +13,10 @@
 #   sbatch hpc/run_agentic_rag.slurm --local-env recipes/Qwen3.6-35B-A3B-FP8.yaml
 #   sbatch hpc/run_agentic_rag.slurm --test-ids 4 12 20 49 56
 #   VLLM_MODEL_PATH=/path/to/model sbatch hpc/run_agentic_rag.slurm
+#
+# A pre-flight ABI check runs before model staging and fails fast (seconds)
+# if a version-locked package pair is inconsistent. Bypass with:
+#   RAG_SKIP_PREFLIGHT=true sbatch hpc/run_agentic_rag.slurm
 #============================================================================
 
 #SBATCH --job-name=agentic-rag
@@ -110,6 +114,252 @@ echo " NVMe staging:      ${USE_NVME}"
 echo " Local Python env:  ${USE_LOCAL_ENV}"
 echo "============================================================"
 echo ""
+
+# ==========================================================================
+# Pre-flight ABI / smoke check  (fail in seconds, not after 20 minutes)
+# ==========================================================================
+# Three version-locked families share one failure mode: upgrading ONE member
+# of a pair breaks the whole engine. Each has cost a full job death before.
+#   A) torch / torchvision / torchaudio
+#   B) flashinfer-python / flashinfer-cubin
+#   C) apache-tvm-ffi / tilelang
+# Step 1 validates the version pairs. Step 2 imports the real stack, which
+# catches ABI breaks that metadata alone cannot see (e.g. Family C aborts via
+# C++ terminate() with no Python traceback, so it must be imported to detect).
+# Set RAG_SKIP_PREFLIGHT=true to bypass.
+# ==========================================================================
+if [[ "${RAG_SKIP_PREFLIGHT:-false}" != "true" ]]; then
+    PREFLIGHT_LOG="logs/preflight-${SLURM_JOB_ID:-manual}.log"
+    echo "--- Pre-flight ABI check ---"
+
+    # --- Step 1: version pairs (metadata only; no heavy imports) ---
+    if ! "${RAG_PYTHON}" -u - 2>&1 <<'PY' | tee "${PREFLIGHT_LOG}"
+import importlib.metadata as md
+import sys
+
+failures = []
+notes = []
+
+
+def get(name):
+    try:
+        return md.version(name)
+    except md.PackageNotFoundError:
+        return None
+
+
+def base(v):
+    """Strip local version segment: 2.13.0+cu130 -> 2.13.0"""
+    return v.split("+")[0] if v else None
+
+
+def parse(v):
+    out = []
+    for part in base(v).split("."):
+        num = "".join(ch for ch in part if ch.isdigit())
+        out.append(int(num) if num else 0)
+    while len(out) < 3:
+        out.append(0)
+    return tuple(out)
+
+
+print("Version pairs:")
+for label, dists in (
+    ("A torch/torchvision/torchaudio",
+     ["torch", "torchvision", "torchaudio"]),
+    ("B flashinfer-python/cubin",
+     ["flashinfer-python", "flashinfer-cubin"]),
+    ("C apache-tvm-ffi/tilelang",
+     ["apache-tvm-ffi", "tilelang"]),
+):
+    shown = "  ".join(f"{d}={get(d) or 'MISSING'}" for d in dists)
+    print(f"  [{label.split()[0]}] {shown}")
+
+# --- Family A: torch family must be co-installed and ABI-compatible ---
+torch_v = get("torch")
+tv_v = get("torchvision")
+ta_v = get("torchaudio")
+for name, v in (("torch", torch_v), ("torchvision", tv_v), ("torchaudio", ta_v)):
+    if v is None:
+        failures.append(f"{name} is not installed")
+if tv_v and not torch_v:
+    failures.append("torchvision installed but torch is missing")
+
+
+def torch_pin(requirer):
+    """Return the exact torch version a package declares in Requires-Dist.
+
+    torchvision/torchaudio record their ABI-coupled torch build here
+    (e.g. "torch (==2.13.0)"), which is authoritative for Family A.
+    """
+    try:
+        reqs = md.requires(requirer) or []
+    except md.PackageNotFoundError:
+        return None
+    for req in reqs:
+        req = req.strip()
+        low = req.lower()
+        if not low.startswith("torch"):
+            continue
+        # Ignore extras/environment markers on other torch subpackages.
+        if low.startswith(("torchvision", "torchaudio", "torch-")):
+            continue
+        if "==" not in req:
+            continue
+        pinned = req.split("==", 1)[1]
+        # Drop any trailing environment marker: "2.13.0 ; extra == 'x'"
+        pinned = pinned.split(";", 1)[0]
+        # Metadata formats this as "torch (==2.13.0)"; strip parens/space.
+        pinned = pinned.strip().strip("()").strip()
+        if pinned:
+            return pinned
+    return None
+
+
+for requirer in ("torchvision", "torchaudio"):
+    if get(requirer) is None or torch_v is None:
+        continue
+    pinned = torch_pin(requirer)
+    if pinned and base(torch_v) != base(pinned):
+        failures.append(
+            f"{requirer} requires torch=={pinned} but torch {torch_v} is "
+            f"installed -- the compiled extension will fail to load symbols"
+        )
+
+# --- Family B: flashinfer versions must match EXACTLY ---
+fp_v = get("flashinfer-python")
+fc_v = get("flashinfer-cubin")
+if fp_v and fc_v and fp_v != fc_v:
+    failures.append(
+        f"flashinfer version mismatch: flashinfer-python={fp_v} vs "
+        f"flashinfer-cubin={fc_v} (must be identical)"
+    )
+
+# --- Family C: tilelang caps apache-tvm-ffi ---
+tf_v = get("apache-tvm-ffi")
+tl_v = get("tilelang")
+if tf_v and tl_v and parse(tf_v) > (0, 1, 11):
+    failures.append(
+        f"apache-tvm-ffi {tf_v} exceeds the <=0.1.11 that tilelang {tl_v} "
+        f"supports -- triggers a C++ abort in tilelang type registration"
+    )
+
+for n in notes:
+    print(f"  WARNING: {n}")
+if failures:
+    print("")
+    for f in failures:
+        print(f"  FAIL: {f}")
+    print("  Version-pair check FAILED")
+    sys.exit(1)
+print("  Version-pair check passed")
+PY
+    then
+        echo ""
+        echo "============================================================"
+        echo " PRE-FLIGHT FAILED: environment version pairs are inconsistent."
+        echo " See ${PREFLIGHT_LOG}"
+        echo " This would have died mid-warmup after ~20 minutes."
+        echo " Bypass with RAG_SKIP_PREFLIGHT=true (not recommended)."
+        echo "============================================================"
+        exit 1
+    fi
+
+    # --- Step 2: import the real stack (catches ABI breaks metadata misses) ---
+    echo "--- Pre-flight import smoke test ---"
+    if ! "${RAG_PYTHON}" -u - 2>&1 <<'PY' | tee -a "${PREFLIGHT_LOG}"
+import sys
+
+failures = []
+
+
+def check(label, fn):
+    try:
+        fn()
+        print(f"  ok    {label}")
+    except BaseException as e:  # noqa: BLE001 - report everything
+        print(f"  FAIL  {label}: {type(e).__name__}: {e}")
+        failures.append(label)
+
+
+def _torch():
+    import torch  # noqa: F401
+
+
+def _torchvision():
+    import torch
+    import torchvision  # noqa: F401
+    # The exact op that broke in Family A.
+    assert hasattr(torch.ops.torchvision, "nms"), "torchvision::nms not registered"
+
+
+def _transformers():
+    import transformers.image_utils  # noqa: F401
+
+
+def _flashinfer():
+    import flashinfer  # noqa: F401
+
+
+def _tilelang():
+    # Family C canary. A too-new apache-tvm-ffi makes this import abort the
+    # process via C++ terminate() (SIGABRT) with no Python traceback, so it
+    # runs in a subprocess where we can detect the signal explicitly.
+    import subprocess
+    proc = subprocess.run(
+        [sys.executable, "-c", "import tilelang"],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+        tail = detail[-1] if detail else f"exit code {proc.returncode}"
+        raise RuntimeError(tail)
+
+
+def _vllm():
+    from vllm import LLM, SamplingParams  # noqa: F401
+
+
+def _vllm_ext():
+    import vllm._C_stable_libtorch
+    import vllm._moe_C_stable_libtorch
+
+
+for label, fn in (
+    ("torch", _torch),
+    ("torchvision + nms op", _torchvision),
+    ("transformers.image_utils", _transformers),
+    ("flashinfer", _flashinfer),
+    ("tilelang", _tilelang),
+    ("vllm", _vllm),
+    ("vllm CUDA extensions", _vllm_ext),
+):
+    check(label, fn)
+
+if failures:
+    print("")
+    print(f"  Import smoke test FAILED ({len(failures)} module(s))")
+    sys.exit(1)
+print("  Import smoke test passed")
+PY
+    then
+        echo ""
+        echo "============================================================"
+        echo " PRE-FLIGHT FAILED: the vLLM kernel stack does not import."
+        echo " See ${PREFLIGHT_LOG}"
+        echo " Likely an ABI mismatch inside a version-locked pair"
+        echo " (torch family, flashinfer, or apache-tvm-ffi/tilelang)."
+        echo " Bypass with RAG_SKIP_PREFLIGHT=true (not recommended)."
+        echo "============================================================"
+        exit 1
+    fi
+    echo "--- Pre-flight passed (log: ${PREFLIGHT_LOG}) ---"
+    echo ""
+else
+    echo "--- Pre-flight ABI check SKIPPED (RAG_SKIP_PREFLIGHT=true) ---"
+    echo ""
+fi
 
 # --- Performance environment variables ---
 export OMP_NUM_THREADS=1                                 # Avoid CPU thread contention
