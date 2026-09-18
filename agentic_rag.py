@@ -209,6 +209,10 @@ def phase1_offline_batch(config, eval_dataset, retriever_tool,
         enforce_eager=model_cfg.get("enforce_eager", False),
         quantization=model_cfg.get("quantization"),
         kv_cache_dtype=model_cfg.get("kv_cache_dtype"),
+        # Hybrid Mamba/SSM models (e.g. Qwen3.8-Flash-Next) need an explicit
+        # cap: each decode sequence consumes a Mamba cache block, while vLLM's
+        # offline default is 1024 seqs on >=70 GiB GPUs.
+        max_num_seqs=model_cfg.get("max_num_seqs"),
     )
     t_load = time.time() - t_load
     print(f"Model loaded in {t_load:.1f}s")
@@ -456,6 +460,8 @@ def phase3_judge(config, all_outputs, evaluation_prompt, checkpoints_dir):
         # main model's, so FP8 is never accidentally applied to the judge.
         quantization=eval_cfg.get("quantization"),
         kv_cache_dtype=eval_cfg.get("kv_cache_dtype"),
+        # Judge-specific cap (independent of the main model's setting).
+        max_num_seqs=eval_cfg.get("max_num_seqs"),
     )
 
     sampling = SamplingParams(

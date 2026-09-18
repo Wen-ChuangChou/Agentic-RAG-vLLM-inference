@@ -34,8 +34,20 @@ def create_offline_llm(
     enforce_eager: bool = False,
     quantization: Optional[str] = None,
     kv_cache_dtype: Optional[str] = None,
+    max_num_seqs: Optional[int] = None,
 ) -> LLM:
-    """Create a vLLM offline LLM instance for batch processing."""
+    """Create a vLLM offline LLM instance for batch processing.
+
+    Args:
+        max_num_seqs: Maximum number of sequences processed concurrently.
+            When ``None`` vLLM picks its own default, which is **1024** for
+            offline ``LLM()`` on GPUs with >= 70 GiB (see
+            ``vllm/engine/arg_utils.py::get_batch_defaults``). Hybrid
+            Mamba/SSM models cannot honour that: each decode sequence needs
+            its own Mamba cache block, and the run fails during CUDA graph
+            capture with ``max_num_seqs (...) exceeds available Mamba cache
+            blocks``. Pass an explicit value for such models.
+    """
     kwargs: dict = dict(
         model=model_id,
         tensor_parallel_size=tensor_parallel_size,
@@ -50,6 +62,8 @@ def create_offline_llm(
         kwargs["quantization"] = quantization
     if kv_cache_dtype is not None:
         kwargs["kv_cache_dtype"] = kv_cache_dtype
+    if max_num_seqs is not None:
+        kwargs["max_num_seqs"] = max_num_seqs
     return LLM(**kwargs)
 
 

@@ -1,0 +1,72 @@
+# ==========================================================================
+# Hybrid Agentic RAG Configuration — Qwen3.6-35B-A3B-FP8
+# ==========================================================================
+# Three-phase pipeline:
+#   Phase 1 (Offline): Standard RAG + Vanilla via vllm.LLM.generate()
+#   Phase 2 (Server):  Concurrent Agentic RAG via vLLM server + asyncio
+#   Phase 3 (Offline): Judge evaluation via vllm.LLM.generate()
+
+# === Main model (Phases 1 & 2) ===
+model:
+  model_id: "Qwen/Qwen3.8-Flash-Next-FP8"
+  model_path: ""                            # Set by VLLM_MODEL_PATH env var or NVMe staging
+  tensor_parallel_size: 4
+  gpu_memory_utilization: 0.94
+  max_model_len: 16384
+  phase1_max_model_len: 8192
+  phase2_max_model_len: 65536
+  # Hybrid attention+Mamba model (Qwen4ExpForConditionalGeneration): each decode
+  # sequence consumes one Mamba cache block, and only ~300 blocks fit alongside
+  # the 45.5 GiB of weights at gpu_memory_utilization 0.94. vLLM's offline
+  # default on >=70 GiB GPUs is max_num_seqs=1024, which fails CUDA graph
+  # capture with "max_num_seqs (1024) exceeds available Mamba cache blocks".
+  # 256 stays safely under the ceiling while keeping throughput high.
+  max_num_seqs: 256
+  dtype: "auto"
+  # quantization: "fp8"
+  # kv_cache_dtype: "fp8"
+  trust_remote_code: true
+  temperature: 0.2
+  max_tokens: 4096
+  enforce_eager: false                       # Workaround for Hopper TMA descriptor crash
+
+# === vLLM server settings (Phase 2 only) ===
+server:
+  health_timeout: 2400                      # Cold startup took ~940s in validation
+  port: 8000
+  api_key: "ai4all"
+  host: "0.0.0.0"
+  extra_args: ["--enable-expert-parallel", "--max-num-seqs", "256"]
+  # extra_args: ["--quantization", "fp8", "--kv-cache-dtype", "fp8"]
+  # extra_args: ["--enforce-eager"]        # Workaround for Hopper TMA descriptor crash in FlashAttention MLA
+
+# === Evaluation judge model (Phase 3) ===
+evaluation:
+  model_id: "openai/gpt-oss-120b"
+  model_path: ""                            # Set by VLLM_JUDGE_MODEL_PATH env var
+  temperature: 0.0
+  max_model_len: 8192  
+  max_tokens: 4096
+
+# === Async agentic settings (Phase 2) ===
+async:
+  concurrency: 32                          # Number of concurrent agentic queries
+  checkpoint_interval: 5                    # Save checkpoint every N completions
+  planning_interval: 5                      # Number of steps before replanning
+  max_steps: 30                             # Maximum execution steps per agent
+
+# === Vector DB config ===
+vectordb:
+  batch_size: 50
+  max_workers: 4
+  doc_chunk_size: 100
+  text_chunk_size: 200
+  text_chunk_overlap: 40
+  force_rebuild: false
+  use_parallel: true
+
+## === Prompt config ===
+prompt:
+  agent_prompt_filename: "gemini_agent_system_prompt.yaml" #Prompt of Agentic RAG
+  judge_prompt_filename: "evaluation_prompt.yaml" #Prompt of Judge LLM
+  
