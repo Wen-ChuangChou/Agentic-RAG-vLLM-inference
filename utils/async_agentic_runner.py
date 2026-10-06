@@ -82,18 +82,21 @@ def _create_agent(model_config: dict,
                   planning_interval: int = 3,
                   max_steps: int = 12) -> CodeAgent:
     """Create a fresh CodeAgent instance for a single agentic run."""
-    llm = CancellableOpenAIServerModel(
-        model_id=model_config["model_id"],
-        api_base=model_config["api_base"],
-        api_key=model_config.get("api_key", "ai4all"),
-        max_tokens=model_config.get("max_tokens", 16384),
-        temperature=model_config.get("temperature", 0.2),
+    llm_kwargs = {
+        "model_id": model_config["model_id"],
+        "api_base": model_config["api_base"],
+        "api_key": model_config.get("api_key", "ai4all"),
+        "max_tokens": model_config.get("max_tokens", 16384),
+        "temperature": model_config.get("temperature", 0.2),
         # HTTP-level timeout (seconds) per API call.  Ensures threads exit
         # naturally when vLLM hangs instead of becoming unkillable zombies.
-        client_kwargs={"timeout": model_config.get("request_timeout", 90.0),
-                       "max_retries": 0},
-        retry=False,
-    )
+        "client_kwargs": {"timeout": model_config.get("request_timeout", 90.0),
+                          "max_retries": 0},
+        "retry": False,
+    }
+    if "top_p" in model_config:
+        llm_kwargs["top_p"] = model_config["top_p"]
+    llm = CancellableOpenAIServerModel(**llm_kwargs)
     retriever = RetrieverTool(vectordb)
     agent = RetryableCodeAgent(
         tools=[retriever],

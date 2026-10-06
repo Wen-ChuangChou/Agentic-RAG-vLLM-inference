@@ -1,5 +1,5 @@
 # ==========================================================================
-# Hybrid Agentic RAG Configuration — Qwen3.6-35B-A3B-FP8
+# Hybrid Agentic RAG Configuration — Qwen3.8-Flash-Next-FP8
 # ==========================================================================
 # Three-phase pipeline:
 #   Phase 1 (Offline): Standard RAG + Vanilla via vllm.LLM.generate()

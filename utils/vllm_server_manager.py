@@ -22,7 +22,16 @@ class VLLMServerManager:
 
     Usage::
 
-        with VLLMServerManager(model_id="zai-org/GLM-4.7-Flash", ...) as srv:
+        with VLLMServerManager(
+            model_id="zai-org/GLM-5.3-Flash",
+            tensor_parallel_size=1,
+            data_parallel_size=8,
+            data_parallel_size_local=4,
+            enable_expert_parallel=True,
+            all2all_backend="deepep_low_latency",
+            data_parallel_backend="ray",
+            ...
+        ) as srv:
             # srv.url  →  "http://localhost:8000/v1"
             ...
         # server is automatically stopped
@@ -33,13 +42,20 @@ class VLLMServerManager:
         model_id: str,
         port: int = 8000,
         api_key: str = "ai4all",
-        tensor_parallel_size: int = 2,
+        tensor_parallel_size: int = 1,
+        data_parallel_size: Optional[int] = None,
+        data_parallel_size_local: Optional[int] = None,
+        enable_expert_parallel: bool = False,
+        all2all_backend: Optional[str] = None,
+        data_parallel_backend: Optional[str] = None,
         gpu_memory_utilization: float = 0.92,
         max_model_len: int = 131072,
         dtype: str = "auto",
         host: str = "0.0.0.0",
         trust_remote_code: bool = True,
         enable_prefix_caching: bool = True,
+        enforce_eager: bool = False,
+        moe_backend: Optional[str] = None,
         extra_args: Optional[List[str]] = None,
         health_timeout: int = 600,
         health_poll_interval: int = 10,
@@ -52,12 +68,19 @@ class VLLMServerManager:
         self.port = port
         self.api_key = api_key
         self.tensor_parallel_size = tensor_parallel_size
+        self.data_parallel_size = data_parallel_size
+        self.data_parallel_size_local = data_parallel_size_local
+        self.enable_expert_parallel = enable_expert_parallel
+        self.all2all_backend = all2all_backend
+        self.data_parallel_backend = data_parallel_backend
         self.gpu_memory_utilization = gpu_memory_utilization
         self.max_model_len = max_model_len
         self.dtype = dtype
         self.host = host
         self.trust_remote_code = trust_remote_code
         self.enable_prefix_caching = enable_prefix_caching
+        self.enforce_eager = enforce_eager
+        self.moe_backend = moe_backend
         self.extra_args = extra_args or []
         self.health_timeout = health_timeout
         self.health_poll_interval = health_poll_interval
@@ -74,12 +97,12 @@ class VLLMServerManager:
     # ------------------------------------------------------------------
 
     def _build_command(self) -> list:
-        """Build the ``python -m vllm.entrypoints.openai.api_server`` cmd."""
+        """Build the ``vllm serve`` command."""
         cmd = [
             sys.executable,
             *(["-X", "importtime"] if self.profile_imports else []),
-            "-m", "vllm.entrypoints.openai.api_server",
-            "--model", self.model_id,
+            "-m", "vllm.entrypoints.cli.main", "serve",
+            self.model_id,
             "--served-model-name", self.served_model_name,
             "--port", str(self.port),
             "--api-key", self.api_key,
@@ -89,13 +112,26 @@ class VLLMServerManager:
             "--max-model-len", str(self.max_model_len),
             "--dtype", self.dtype,
         ]
+        if self.data_parallel_size is not None:
+            cmd.extend(["--data-parallel-size", str(self.data_parallel_size)])
+        if self.data_parallel_size_local is not None:
+            cmd.extend(["--data-parallel-size-local", str(self.data_parallel_size_local)])
+        if self.enable_expert_parallel:
+            cmd.append("--enable-expert-parallel")
+        if self.all2all_backend:
+            cmd.extend(["--all2all-backend", str(self.all2all_backend)])
+        if self.data_parallel_backend:
+            cmd.extend(["--data-parallel-backend", str(self.data_parallel_backend)])
         if self.trust_remote_code:
             cmd.append("--trust-remote-code")
         if self.enable_prefix_caching:
             cmd.append("--enable-prefix-caching")
+        if self.enforce_eager:
+            cmd.append("--enforce-eager")
+        if self.moe_backend:
+            cmd.extend(["--moe-backend", str(self.moe_backend)])
             
         cmd.append("--disable-custom-all-reduce")
-        
         cmd.extend(self.extra_args)
         return cmd
 
@@ -105,9 +141,13 @@ class VLLMServerManager:
 
     def start(self) -> None:
         """Start the vLLM server subprocess."""
+        if self.all2all_backend and "deepep" in self.all2all_backend:
+            # DeepEP kernels require EP ranks to be placed with strict packing across nodes in Ray
+            os.environ.setdefault("VLLM_RAY_DP_PACK_STRATEGY", "strict")
+
         cmd = self._build_command()
         print(f"Starting vLLM server: {self.model_id} on port {self.port}")
-        print(f"  Command: {' '.join(cmd[:8])} ...")
+        print(f"  Command: {' '.join(cmd[:12])} ...")
 
         # Unread PIPEs eventually fill and block the API server in a log write.
         # Files remain available after shutdown and do not require a drain thread.

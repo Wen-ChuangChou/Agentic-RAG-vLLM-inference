@@ -8,10 +8,15 @@
 #   Phase 3: Offline batch Judge via vllm.LLM
 #
 # Usage:
+#   # Single node (default, 4 GPUs, e.g. Qwen3.8-Flash-Next-FP8, GLM-4.7-Flash):
 #   sbatch hpc/run_agentic_rag.slurm
-#   sbatch hpc/run_agentic_rag.slurm recipes/other-model.yaml
+#   sbatch hpc/run_agentic_rag.slurm recipes/Qwen3.8-Flash-Next-FP8.yaml
 #   sbatch hpc/run_agentic_rag.slurm --local-env recipes/Qwen3.6-35B-A3B-FP8.yaml
 #   sbatch hpc/run_agentic_rag.slurm --test-ids 4 12 20 49 56
+#
+#   # Two nodes (8 GPUs, e.g. GLM-5.3-Flash with Ray Data Parallel):
+#   sbatch --nodes=2 --ntasks=2 --cpus-per-task=56 --mem=0 --gpus-per-node=4 --gres-flags=disable-binding --exclusive --time=01:30:00 hpc/run_agentic_rag.slurm recipes/GLM-5.3-Flash.yaml
+#
 #   VLLM_MODEL_PATH=/path/to/model sbatch hpc/run_agentic_rag.slurm
 #
 # A pre-flight ABI check runs before model staging and fails fast (seconds)
@@ -23,11 +28,13 @@
 #SBATCH --output=logs/%x-%j.out
 #SBATCH --error=logs/%x-%j.err
 #SBATCH --nodes=1
-#SBATCH --ntasks-per-node=1
+#SBATCH --ntasks=1
 #SBATCH --gpus-per-node=4
-#SBATCH --cpus-per-task=16
-#SBATCH --mem=256G
-#SBATCH --time=00:45:00
+#SBATCH --cpus-per-task=56
+#SBATCH --mem=0
+#SBATCH --gres-flags=disable-binding
+#SBATCH --exclusive
+#SBATCH --time=01:00:00
 #SBATCH --partition=capella
 #SBATCH --mail-user=wen-chuang.chou@tu-dresden.de
 #SBATCH --mail-type=ALL
@@ -41,29 +48,56 @@ START_TIME=$(date +%s)
 # Configuration (override via environment variables)
 # ==========================================================================
 USE_LOCAL_ENV="${VLLM_LOCAL_ENV:-false}"
-if [[ "${1:-}" == "--local-env" ]]; then
-    USE_LOCAL_ENV=true
-    shift
-fi
-# Handle optional config file as first argument
-if [[ $# -gt 0 && ! $1 =~ ^- ]]; then
-    RAG_CONFIG="$1"
-    shift # Remove the config path from $@ so it's not passed twice
-else
-    RAG_CONFIG="recipes/GLM-4.7-Flash.yaml"
-fi
-
-# Extract model names from the YAML config (or fallback to env vars)
-# This will be done in the Environment setup section after loading python!
-
-# Model-weight staging is separate from Python-environment staging.
 USE_NVME="${VLLM_USE_NVME:-false}"
-RAG_JOB_TMP=$(mktemp -d "/tmp/agentic-rag-${SLURM_JOB_ID:?Submit with sbatch}-XXXXXX")
+RAG_CONFIG=""
+EXTRA_ARGS=()
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --local-env)
+            USE_LOCAL_ENV=true
+            shift
+            ;;
+        --use-nvme|--nvme)
+            USE_NVME=true
+            shift
+            ;;
+        *.yaml|*.yml)
+            RAG_CONFIG="$1"
+            shift
+            ;;
+        *)
+            if [[ -z "${RAG_CONFIG}" && ! "$1" =~ ^- ]]; then
+                RAG_CONFIG="$1"
+            else
+                EXTRA_ARGS+=("$1")
+            fi
+            shift
+            ;;
+    esac
+done
+
+if [[ -z "${RAG_CONFIG}" ]]; then
+    RAG_CONFIG="recipes/Qwen3.8-Flash-Next-FP8.yaml"
+fi
+set -- "${EXTRA_ARGS[@]}"
+NUM_NODES=${SLURM_NNODES:-1}
+RAG_JOB_TMP="/tmp/agentic-rag-${SLURM_JOB_ID:?Submit with sbatch}"
 NVME_MOUNT="${RAG_JOB_TMP}"
 cleanup_job_tmp() {
-    if [[ -d "${RAG_JOB_TMP}" ]]; then
-        echo "Removing job-local files: ${RAG_JOB_TMP}"
-        rm -rf -- "${RAG_JOB_TMP}"
+    if [ "${RAY_STARTED:-false}" = "true" ]; then
+        echo "Stopping Ray cluster across all nodes..."
+        if [ "${NUM_NODES}" -gt 1 ]; then
+            srun --overlap --nodes="${NUM_NODES}" --ntasks="${NUM_NODES}" "${RAY_BIN:-ray}" stop --force 2>/dev/null || true
+        else
+            "${RAY_BIN:-ray}" stop --force 2>/dev/null || true
+        fi
+    fi
+    echo "Removing job-local files across all nodes: ${RAG_JOB_TMP}"
+    if [ "${NUM_NODES}" -gt 1 ]; then
+        srun --overlap --nodes="${NUM_NODES}" --ntasks="${NUM_NODES}" rm -rf -- "${RAG_JOB_TMP}" 2>/dev/null || true
+    else
+        rm -rf -- "${RAG_JOB_TMP}" 2>/dev/null || true
     fi
 }
 trap cleanup_job_tmp EXIT
@@ -74,46 +108,177 @@ trap cleanup_job_tmp EXIT
 module purge
 module load release/25.06 GCCcore/13.3.0 Python/3.12.3 CUDA/13.0.0
 RAG_PYTHON="${PWD}/.venv/bin/python"
+# MoE backend configuration: Prefer DeepGEMM to bypass 56-minute CUTLASS JIT compilation
+export VLLM_MOE_USE_DEEP_GEMM=1
+export VLLM_USE_DEEP_GEMM=1
+
+# FlashInfer compilation workspace directory
 if [[ "${USE_LOCAL_ENV}" == "true" ]]; then
     # Cached build files can contain an earlier job's /tmp source paths.
     # Isolate all compilation caches before importing vLLM or FlashInfer.
-    export FLASHINFER_WORKSPACE_BASE="${RAG_JOB_TMP}"
     export VLLM_CACHE_ROOT="${RAG_JOB_TMP}/cache/vllm"
     export TORCHINDUCTOR_CACHE_DIR="${RAG_JOB_TMP}/cache/torchinductor"
     export TRITON_CACHE_DIR="${RAG_JOB_TMP}/cache/triton"
-    mkdir -p "${VLLM_CACHE_ROOT}" "${TORCHINDUCTOR_CACHE_DIR}" "${TRITON_CACHE_DIR}"
-    python -u hpc/stage_python_env.py .venv "${RAG_JOB_TMP}/venv"
+    export FLASHINFER_WORKSPACE_DIR="${RAG_JOB_TMP}/cache/flashinfer"
+    export FLASHINFER_WORKSPACE_BASE="${RAG_JOB_TMP}"
+    mkdir -p "${FLASHINFER_WORKSPACE_DIR}"
+else
+    mkdir -p "${PWD}/.cache/flashinfer"
+    export FLASHINFER_WORKSPACE_DIR="${PWD}/.cache/flashinfer"
+    export FLASHINFER_WORKSPACE_BASE="${PWD}"
+fi
+
+if [[ "${USE_LOCAL_ENV}" == "true" ]]; then
+    echo "Staging Python environment to local SSD across ${NUM_NODES} node(s)..."
+    if [ "${NUM_NODES}" -gt 1 ]; then
+        srun --nodes="${NUM_NODES}" --ntasks="${NUM_NODES}" bash -c "
+            mkdir -p "${VLLM_CACHE_ROOT}" "${TORCHINDUCTOR_CACHE_DIR}" "${TRITON_CACHE_DIR}"
+            python -u hpc/stage_python_env.py .venv "${RAG_JOB_TMP}/venv"
+        "
+    else
+        mkdir -p "${VLLM_CACHE_ROOT}" "${TORCHINDUCTOR_CACHE_DIR}" "${TRITON_CACHE_DIR}"
+        python -u hpc/stage_python_env.py .venv "${RAG_JOB_TMP}/venv"
+    fi
     RAG_PYTHON="${RAG_JOB_TMP}/venv/bin/python"
 fi
 # Do not source the copied activate script: it contains the old absolute path.
 export VIRTUAL_ENV="${RAG_PYTHON%/bin/python}"
-export PATH="${VIRTUAL_ENV}/bin:${PATH}"
+export PATH="${VIRTUAL_ENV}/bin:${PWD}/.venv/bin:${PATH}"
+RAY_BIN="${VIRTUAL_ENV}/bin/ray"
 echo "Pipeline Python: ${RAG_PYTHON}"
 echo "Job-local files: ${RAG_JOB_TMP}"
 
 # Now that Python + PyYAML is available, extract models from config
-MODEL_NAME="${VLLM_MODEL:-$(python -c "import yaml; print(yaml.safe_load(open('${RAG_CONFIG}'))['model']['model_id'])")}"
-MODEL_PATH="${VLLM_MODEL_PATH:-$(python -c "import yaml; print(yaml.safe_load(open('${RAG_CONFIG}'))['model'].get('model_path', ''))")}"
+MODEL_NAME="${VLLM_MODEL:-$(${RAG_PYTHON} -c "import yaml; print(yaml.safe_load(open('${RAG_CONFIG}'))['model']['model_id'])")}"
+MODEL_PATH="${VLLM_MODEL_PATH:-$(${RAG_PYTHON} -c "import yaml; print(yaml.safe_load(open('${RAG_CONFIG}'))['model'].get('model_path', ''))")}"
 
-JUDGE_MODEL="${VLLM_JUDGE_MODEL:-$(python -c "import yaml; print(yaml.safe_load(open('${RAG_CONFIG}'))['evaluation']['model_id'])")}"
-JUDGE_MODEL_PATH="${VLLM_JUDGE_MODEL_PATH:-$(python -c "import yaml; print(yaml.safe_load(open('${RAG_CONFIG}'))['evaluation'].get('model_path', ''))")}"
+JUDGE_MODEL="${VLLM_JUDGE_MODEL:-$(${RAG_PYTHON} -c "import yaml; print(yaml.safe_load(open('${RAG_CONFIG}'))['evaluation']['model_id'])")}"
+JUDGE_MODEL_PATH="${VLLM_JUDGE_MODEL_PATH:-$(${RAG_PYTHON} -c "import yaml; print(yaml.safe_load(open('${RAG_CONFIG}'))['evaluation'].get('model_path', ''))")}"
+
+# Extract distributed configuration
+DP_BACKEND="$(${RAG_PYTHON} -c "import yaml; print(yaml.safe_load(open('${RAG_CONFIG}')).get('model', {}).get('data_parallel_backend', ''))")"
+DP_SIZE="$(${RAG_PYTHON} -c "import yaml; print(yaml.safe_load(open('${RAG_CONFIG}')).get('model', {}).get('data_parallel_size', 1))")"
+DP_SIZE_LOCAL="$(${RAG_PYTHON} -c "import yaml; print(yaml.safe_load(open('${RAG_CONFIG}')).get('model', {}).get('data_parallel_size_local', 4))")"
+
+NUM_NODES=${SLURM_NNODES:-1}
+REQUIRED_NODES=$(( (DP_SIZE + DP_SIZE_LOCAL - 1) / DP_SIZE_LOCAL ))
+
+# Validate allocation satisfies recipe requirements
+if [ "${NUM_NODES}" -lt "${REQUIRED_NODES}" ]; then
+    echo "============================================================"
+    echo " CONFIG ERROR: Insufficient nodes allocated"
+    echo "============================================================"
+    echo " ${RAG_CONFIG} requires ${REQUIRED_NODES} node(s) (DP_SIZE=${DP_SIZE}, DP_SIZE_LOCAL=${DP_SIZE_LOCAL})"
+    echo " but only ${NUM_NODES} node(s) were allocated."
+    echo ""
+    echo " Re-submit with:"
+    echo "   sbatch --nodes=${REQUIRED_NODES} --cpus-per-task=32 --time=02:00:00 hpc/run_agentic_rag.slurm ${RAG_CONFIG}"
+    echo "============================================================"
+    exit 1
+fi
+
+if [ "${SLURM_CPUS_PER_TASK:-56}" -lt 56 ] && [ "${NUM_NODES}" -gt 1 ]; then
+    echo "============================================================"
+    echo " CONFIG ERROR: Insufficient CPUs per task (${SLURM_CPUS_PER_TASK:-56} < 56)"
+    echo "============================================================"
+    echo " Each Capella compute node has 4 H100 GPUs and 56 usable CPU cores (14 cores/GPU)."
+    echo " Allocating fewer CPUs causes Slurm cgroups to restrict NUMA socket coverage,"
+    echo " which hides GPU 3 (CUDA_VISIBLE_DEVICES=0,1,2) on compute nodes."
+    echo ""
+    echo " Please submit with --cpus-per-task=56 --exclusive:"
+    echo "   sbatch --nodes=${NUM_NODES} --ntasks=${NUM_NODES} --cpus-per-task=56 --mem=0 --gpus-per-node=4 --gres-flags=disable-binding --exclusive --time=01:30:00 hpc/run_agentic_rag.slurm ${RAG_CONFIG}"
+    echo "============================================================"
+    exit 1
+fi
 
 mkdir -p logs
+
+NODELIST=$(scontrol show hostname "${SLURM_JOB_NODELIST:-$(hostname)}")
+HEAD_NODE=$(echo "${NODELIST}" | head -n 1)
+HEAD_NODE_IP=$(srun --nodes=1 --ntasks=1 -w "${HEAD_NODE}" hostname --ip-address 2>/dev/null || hostname -I | awk '{print $1}')
+RAY_PORT=6379
+DP_MASTER_PORT=13345
+
+export HEAD_NODE_IP
+export MASTER_ADDR="${HEAD_NODE_IP}"
+export DP_MASTER_PORT
 
 echo "============================================================"
 echo " Hybrid Agentic RAG Pipeline"
 echo "============================================================"
 echo " Start time:        $(date)"
-echo " Job ID:            ${SLURM_JOB_ID}"
-echo " Node:              $(hostname)"
-echo " GPUs:              ${SLURM_GPUS_PER_NODE}"
+echo " Job ID:            ${SLURM_JOB_ID:-manual}"
+echo " Head Node:         ${HEAD_NODE} (${HEAD_NODE_IP})"
+echo " All Nodes:         $(echo ${NODELIST} | tr '\n' ' ')"
+echo " Nodes Allocated:   ${NUM_NODES}"
+echo " GPUs per Node:     ${SLURM_GPUS_ON_NODE:-4}"
+echo " Total GPUs:        $((NUM_NODES * ${SLURM_GPUS_ON_NODE:-4}))"
 echo " Model:             ${MODEL_NAME}"
 echo " Judge:             ${JUDGE_MODEL}"
 echo " Config:            ${RAG_CONFIG}"
+echo " DP Size:           ${DP_SIZE}"
+echo " DP Backend:        ${DP_BACKEND:-none}"
 echo " NVMe staging:      ${USE_NVME}"
 echo " Local Python env:  ${USE_LOCAL_ENV}"
+if [ "${DP_BACKEND}" = "ray" ] || [ "${NUM_NODES}" -gt 1 ]; then
+    echo " Ray port:          ${RAY_PORT}"
+    echo " DP master:         ${HEAD_NODE_IP}:${DP_MASTER_PORT}"
+fi
 echo "============================================================"
 echo ""
+
+# ==========================================================================
+# Pre-flight Node Health & Filesystem Accessibility check
+# ==========================================================================
+if [ "${NUM_NODES}" -gt 1 ]; then
+    echo "--- Pre-flight node health & filesystem check ---"
+    UNHEALTHY_NODES=""
+    CHECK_OUTPUT=$(srun --nodes="${NUM_NODES}" --ntasks="${NUM_NODES}" \
+        "${RAG_PYTHON}" -c '
+import os, sys, torch
+node = os.uname().nodename
+pwd_ok = os.path.isdir(os.environ.get("PWD", ""))
+py_ok = os.access(sys.executable, os.X_OK)
+gpu_cnt = torch.cuda.device_count() if torch.cuda.is_available() else 0
+cvd = os.environ.get("CUDA_VISIBLE_DEVICES", "unset")
+print(f"NODE_CHECK|{node}|{pwd_ok and py_ok}|{gpu_cnt}|{cvd}")
+' 2>/dev/null || true)
+
+    while IFS='|' read -r TAG NODE FS_OK GPU_COUNT CVD_VAL; do
+        if [ "${TAG}" != "NODE_CHECK" ]; then
+            continue
+        fi
+        if [ "${FS_OK}" != "True" ]; then
+            echo "  [FAIL] Node ${NODE}: Workspace '${PWD}' or '${RAG_PYTHON}' not accessible"
+            UNHEALTHY_NODES="${UNHEALTHY_NODES} ${NODE}"
+        else
+            echo "  [OK]   Node ${NODE}: Filesystem and Python environment accessible"
+        fi
+
+        if [ "${GPU_COUNT}" -lt "${SLURM_GPUS_ON_NODE:-4}" ]; then
+            echo "  [FAIL] Node ${NODE}: Only ${GPU_COUNT}/${SLURM_GPUS_ON_NODE:-4} GPUs visible to CUDA (CUDA_VISIBLE_DEVICES=${CVD_VAL})"
+            UNHEALTHY_NODES="${UNHEALTHY_NODES} ${NODE}"
+        else
+            echo "  [OK]   Node ${NODE}: ${GPU_COUNT}/${SLURM_GPUS_ON_NODE:-4} GPUs verified (CUDA_VISIBLE_DEVICES=${CVD_VAL})"
+        fi
+    done <<< "${CHECK_OUTPUT}" 
+
+    if [ -n "${UNHEALTHY_NODES}" ]; then
+        echo ""
+        echo "============================================================"
+        echo " PRE-FLIGHT NODE HEALTH FAILURE:"
+        echo " Unhealthy node(s) detected:${UNHEALTHY_NODES}"
+        echo " Either storage is unmounted or fewer than ${SLURM_GPUS_ON_NODE:-4} GPUs are accessible."
+        echo ""
+        echo " Please re-submit your job excluding the broken nodes:"
+        BAD_LIST=$(echo "${UNHEALTHY_NODES}" | xargs | tr ' ' ',')
+        echo "   sbatch --exclude=${BAD_LIST} ... hpc/run_agentic_rag.slurm ${RAG_CONFIG}"
+        echo "============================================================"
+        exit 1
+    fi
+    echo "--- All allocated nodes passed filesystem check ---"
+    echo ""
+fi
 
 # ==========================================================================
 # Pre-flight ABI / smoke check  (fail in seconds, not after 20 minutes)
@@ -361,6 +526,42 @@ else
     echo ""
 fi
 
+# ==========================================================================
+# Start Ray cluster across nodes (only when Ray backend is configured)
+# ==========================================================================
+RAY_STARTED=false
+if [ "${DP_BACKEND}" = "ray" ] || { [ "${NUM_NODES}" -gt 1 ] && [ "${DP_SIZE}" -gt 1 ]; }; then
+    RAY_STARTED=true
+    export VLLM_RAY_DP_PACK_STRATEGY=strict
+
+    echo "Starting Ray head on ${HEAD_NODE} (${HEAD_NODE_IP}:${RAY_PORT})..."
+    "${RAY_BIN}" start --head \
+        --node-ip-address="${HEAD_NODE_IP}" \
+        --port=${RAY_PORT} \
+        --num-cpus "${SLURM_CPUS_PER_TASK}" \
+        --num-gpus "${SLURM_GPUS_ON_NODE:-4}" \
+        --disable-usage-stats
+
+    if [ "${NUM_NODES}" -gt 1 ]; then
+        WORKER_NODES=$(echo "${NODELIST}" | tail -n +2 | tr '\n' ',' | sed 's/,$//')
+        NUM_WORKERS=$(( NUM_NODES - 1 ))
+        echo "Starting Ray worker(s) on ${WORKER_NODES} (${NUM_WORKERS} worker nodes)..."
+        srun --nodes="${NUM_WORKERS}" --ntasks="${NUM_WORKERS}" -w "${WORKER_NODES}" \
+            "${RAY_BIN}" start \
+            --address="${HEAD_NODE_IP}:${RAY_PORT}" \
+            --num-cpus "${SLURM_CPUS_PER_TASK:-56}" \
+            --num-gpus "${SLURM_GPUS_ON_NODE:-4}" \
+            --disable-usage-stats
+    fi
+
+    echo "Waiting for Ray cluster to settle..."
+    sleep 5
+    "${RAY_BIN}" status
+else
+    echo "Ray cluster not required (single-node non-Ray setup)."
+fi
+
+
 # --- Performance environment variables ---
 export OMP_NUM_THREADS=1                                 # Avoid CPU thread contention
 export VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1        # Better KV cache sizing
@@ -414,11 +615,20 @@ stage_to_nvme() {
     echo "  Source:  ${SRC}"
     echo "  Dest:    ${DEST}"
     local T0=$(date +%s)
-    mkdir -p "${DEST}"
-    rsync -aL --info=progress2 "${SRC}/" "${DEST}/"
+    if [ "${NUM_NODES}" -gt 1 ]; then
+        srun --nodes="${NUM_NODES}" --ntasks="${NUM_NODES}" bash -c "
+            mkdir -p '${DEST}'
+            rsync -aL '${SRC}/' '${DEST}/'
+            echo \"\$(hostname): Copied in \$(du -sh '${DEST}' | cut -f1)\"
+        "
+    else
+        mkdir -p "${DEST}"
+        rsync -aL --info=progress2 "${SRC}/" "${DEST}/"
+        echo "$(hostname): Copied in $(du -sh "${DEST}" | cut -f1)"
+    fi
     local T1=$(date +%s)
     echo "  Copied in $((T1 - T0))s  ($(du -sh "${DEST}" | cut -f1))"
-    
+
     # Export the final path dynamically
     export ${VAR_NAME}="${DEST}"
     echo "  Set ${VAR_NAME}=${DEST}"
@@ -458,7 +668,14 @@ echo "============================================================"
 echo ""
 
 EXIT_CODE=0
-srun "${RAG_PYTHON}" -u agentic_rag.py --config "${RAG_CONFIG}" "$@" || EXIT_CODE=$?
+if [ "${NUM_NODES}" -gt 1 ] && [ "${DP_SIZE}" -gt 1 ]; then
+    echo "Launching multi-node pipeline across ${NUM_NODES} nodes (${NUM_NODES} tasks total, 1 task/node)..."
+    srun --nodes="${NUM_NODES}" --ntasks="${NUM_NODES}" \
+        "${RAG_PYTHON}" -u agentic_rag.py --config "${RAG_CONFIG}" "$@" || EXIT_CODE=$?
+else
+    echo "Launching single-node pipeline on ${HEAD_NODE}..."
+    "${RAG_PYTHON}" -u agentic_rag.py --config "${RAG_CONFIG}" "$@" || EXIT_CODE=$?
+fi
 
 # ==========================================================================
 # Cleanup & Timing report

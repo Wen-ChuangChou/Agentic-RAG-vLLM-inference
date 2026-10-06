@@ -24,6 +24,14 @@ import torch
 import yaml
 from dotenv import load_dotenv
 from pathlib import Path
+
+# Ensure FlashInfer persistent JIT cache directory is configured
+if 'FLASHINFER_WORKSPACE_DIR' not in os.environ:
+    os.environ['FLASHINFER_WORKSPACE_DIR'] = os.path.abspath('.cache/flashinfer')
+if 'FLASHINFER_WORKSPACE_BASE' not in os.environ:
+    os.environ['FLASHINFER_WORKSPACE_BASE'] = os.path.abspath('.')
+os.makedirs(os.environ['FLASHINFER_WORKSPACE_DIR'], exist_ok=True)
+
 from vllm import SamplingParams
 
 from utils.agent_tools import RetrieverTool
@@ -35,6 +43,7 @@ from utils.offline_runner import (
     build_rag_prompts,
     build_judge_prompts,
     run_offline_batch,
+    run_offline_dp_batch,
     save_phase_results,
     load_phase_results,
 )
@@ -141,7 +150,7 @@ def _gpu_cleanup(label: str = "",
 
 
 def phase1_offline_batch(config, eval_dataset, retriever_tool,
-                         checkpoints_dir):
+                         checkpoints_dir, dp_args=None):
     """
     Phase 1: Offline batch processing for Standard RAG + Vanilla LLM.
     Pre-retrieves all contexts on CPU, then runs a single
@@ -195,79 +204,149 @@ def phase1_offline_batch(config, eval_dataset, retriever_tool,
     vanilla_convos = (build_vanilla_prompts(eval_dataset)
                       if cached_vanilla is None else None)
 
-    # 1b — Load model offline
-    print(f"\nLoading model for offline inference: {model_id}")
-    t_load = time.time()
-    llm = create_offline_llm(
-        model_id=model_id,
-        tensor_parallel_size=model_cfg.get("tensor_parallel_size", 2),
-        gpu_memory_utilization=model_cfg.get("gpu_memory_utilization", 0.92),
-        max_model_len=model_cfg.get("phase1_max_model_len",
-                                    model_cfg.get("max_model_len", 131072)),
-        trust_remote_code=model_cfg.get("trust_remote_code", True),
-        dtype=model_cfg.get("dtype", "auto"),
-        enforce_eager=model_cfg.get("enforce_eager", False),
-        quantization=model_cfg.get("quantization"),
-        kv_cache_dtype=model_cfg.get("kv_cache_dtype"),
-        # Hybrid Mamba/SSM models (e.g. Qwen3.8-Flash-Next) need an explicit
-        # cap: each decode sequence consumes a Mamba cache block, while vLLM's
-        # offline default is 1024 seqs on >=70 GiB GPUs.
-        max_num_seqs=model_cfg.get("max_num_seqs"),
-    )
-    t_load = time.time() - t_load
-    print(f"Model loaded in {t_load:.1f}s")
-
+    dp_size = model_cfg.get("data_parallel_size", 1)
     sampling = SamplingParams(
         temperature=model_cfg.get("temperature", 0.2),
+        top_p=model_cfg.get("top_p", 1.0),
         max_tokens=model_cfg.get("max_tokens", 16384),
     )
 
-    # 1c — Standard RAG batch
+    t_load = 0.0
     t_rag = 0.0
-    rag_results = cached_rag
-    if rag_results is None:
-        print("\n--- Standard RAG batch inference ---")
-        t0 = time.time()
-        rag_answers = run_offline_batch(llm, rag_convos, sampling)
-        t_rag = time.time() - t0
-        print(f"Standard RAG batch completed in {t_rag:.1f}s")
-        rag_results = [{
-            "question": eval_dataset[i]["question"],
-            "true_answer": eval_dataset[i]["answer"],
-            "source_doc": eval_dataset[i]["source_doc"],
-            "generated_answer": str(a),
-        } for i, a in enumerate(rag_answers)]
-        # Store model_load_seconds here (shared across Phase 1) so it can be
-        # recovered when both Phase 1 checkpoints are hit on future runs.
-        save_phase_results(rag_results, rag_ckpt, "standard_rag",
-                           elapsed_time=t_rag,
-                           extra_timing={"model_load_seconds": t_load})
-    else:
-        t_rag = cached_rag_timing.get("elapsed_time") or 0.0
-
-    # 1d — Vanilla batch
     t_vanilla = 0.0
-    vanilla_results = cached_vanilla
-    if vanilla_results is None:
-        print("\n--- Vanilla LLM batch inference ---")
-        t0 = time.time()
-        vanilla_answers = run_offline_batch(llm, vanilla_convos, sampling)
-        t_vanilla = time.time() - t0
-        print(f"Vanilla batch completed in {t_vanilla:.1f}s")
-        vanilla_results = [{
-            "question": eval_dataset[i]["question"],
-            "true_answer": eval_dataset[i]["answer"],
-            "source_doc": eval_dataset[i]["source_doc"],
-            "generated_answer": str(a),
-        } for i, a in enumerate(vanilla_answers)]
-        save_phase_results(vanilla_results, vanilla_ckpt, "standard",
-                           elapsed_time=t_vanilla)
-    else:
-        t_vanilla = cached_vanilla_timing.get("elapsed_time") or 0.0
 
-    # 1e — Release GPU
-    print("\nReleasing GPU memory after Phase 1 ...")
-    release_offline_llm(llm)
+    if dp_size > 1:
+        # Multi-process Data Parallel batch inference (from data_parallel_offline.py)
+        dp_kwargs = dict(
+            model_id=model_id,
+            data_parallel_size=dp_size,
+            data_parallel_size_local=model_cfg.get("data_parallel_size_local"),
+            tensor_parallel_size=model_cfg.get("tensor_parallel_size", 1),
+            enable_expert_parallel=model_cfg.get("enable_expert_parallel", True),
+            all2all_backend=model_cfg.get("all2all_backend", "allgather_reducescatter"),
+            gpu_memory_utilization=model_cfg.get("gpu_memory_utilization", 0.92),
+            max_model_len=model_cfg.get("phase1_max_model_len",
+                                        model_cfg.get("max_model_len", 131072)),
+            trust_remote_code=model_cfg.get("trust_remote_code", True),
+            dtype=model_cfg.get("dtype", "auto"),
+            enforce_eager=model_cfg.get("enforce_eager", False),
+            quantization=model_cfg.get("quantization"),
+            kv_cache_dtype=model_cfg.get("kv_cache_dtype"),
+            max_num_seqs=model_cfg.get("max_num_seqs"),
+            max_num_batched_tokens=model_cfg.get("max_num_batched_tokens"),
+            moe_backend=model_cfg.get("moe_backend"),
+            timeout=model_cfg.get("offline_timeout", 3600),
+            chat_template_kwargs=model_cfg.get("chat_template_kwargs"),
+            dp_num_nodes=(dp_args or {}).get("dp_num_nodes", 1),
+            dp_node_rank=(dp_args or {}).get("dp_node_rank", 0),
+            dp_master_addr=(dp_args or {}).get("dp_master_addr", "127.0.0.1"),
+            dp_master_port=(dp_args or {}).get("dp_master_port", 13345),
+        )
+
+        rag_results = cached_rag
+        if rag_results is None:
+            print("\n--- Standard RAG batch inference (Data Parallel) ---")
+            t0 = time.time()
+            rag_answers = run_offline_dp_batch(conversations=rag_convos, sampling_params=sampling, **dp_kwargs)
+            t_rag = time.time() - t0
+            print(f"Standard RAG batch completed in {t_rag:.1f}s")
+            if (dp_args or {}).get("dp_node_rank", 0) == 0:
+                rag_results = [{
+                    "question": eval_dataset[i]["question"],
+                    "true_answer": eval_dataset[i]["answer"],
+                    "source_doc": eval_dataset[i]["source_doc"],
+                    "generated_answer": str(a),
+                } for i, a in enumerate(rag_answers)]
+                save_phase_results(rag_results, rag_ckpt, "standard_rag", elapsed_time=t_rag)
+            else:
+                rag_results = []
+        else:
+            t_rag = cached_rag_timing.get("elapsed_time") or 0.0
+
+        vanilla_results = cached_vanilla
+        if vanilla_results is None:
+            print("\n--- Vanilla LLM batch inference (Data Parallel) ---")
+            t0 = time.time()
+            vanilla_answers = run_offline_dp_batch(conversations=vanilla_convos, sampling_params=sampling, **dp_kwargs)
+            t_vanilla = time.time() - t0
+            print(f"Vanilla batch completed in {t_vanilla:.1f}s")
+            if (dp_args or {}).get("dp_node_rank", 0) == 0:
+                vanilla_results = [{
+                    "question": eval_dataset[i]["question"],
+                    "true_answer": eval_dataset[i]["answer"],
+                    "source_doc": eval_dataset[i]["source_doc"],
+                    "generated_answer": str(a),
+                } for i, a in enumerate(vanilla_answers)]
+                save_phase_results(vanilla_results, vanilla_ckpt, "standard", elapsed_time=t_vanilla)
+            else:
+                vanilla_results = []
+        else:
+            t_vanilla = cached_vanilla_timing.get("elapsed_time") or 0.0
+    else:
+        # 1b — Load model offline (Single-process)
+        print(f"\nLoading model for offline inference: {model_id}")
+        t_load = time.time()
+        llm = create_offline_llm(
+            model_id=model_id,
+            tensor_parallel_size=model_cfg.get("tensor_parallel_size", 2),
+            gpu_memory_utilization=model_cfg.get("gpu_memory_utilization", 0.92),
+            max_model_len=model_cfg.get("phase1_max_model_len",
+                                        model_cfg.get("max_model_len", 131072)),
+            trust_remote_code=model_cfg.get("trust_remote_code", True),
+            dtype=model_cfg.get("dtype", "auto"),
+            enforce_eager=model_cfg.get("enforce_eager", False),
+            quantization=model_cfg.get("quantization"),
+            kv_cache_dtype=model_cfg.get("kv_cache_dtype"),
+            max_num_seqs=model_cfg.get("max_num_seqs"),
+            max_num_batched_tokens=model_cfg.get("max_num_batched_tokens"),
+            moe_backend=model_cfg.get("moe_backend"),
+            timeout=model_cfg.get("offline_timeout", 3600),
+        )
+        t_load = time.time() - t_load
+        print(f"Model loaded in {t_load:.1f}s")
+
+        # 1c — Standard RAG batch
+        rag_results = cached_rag
+        if rag_results is None:
+            print("\n--- Standard RAG batch inference ---")
+            t0 = time.time()
+            rag_answers = run_offline_batch(llm, rag_convos, sampling, chat_template_kwargs=model_cfg.get("chat_template_kwargs"))
+            t_rag = time.time() - t0
+            print(f"Standard RAG batch completed in {t_rag:.1f}s")
+            rag_results = [{
+                "question": eval_dataset[i]["question"],
+                "true_answer": eval_dataset[i]["answer"],
+                "source_doc": eval_dataset[i]["source_doc"],
+                "generated_answer": str(a),
+            } for i, a in enumerate(rag_answers)]
+            save_phase_results(rag_results, rag_ckpt, "standard_rag",
+                               elapsed_time=t_rag,
+                               extra_timing={"model_load_seconds": t_load})
+        else:
+            t_rag = cached_rag_timing.get("elapsed_time") or 0.0
+
+        # 1d — Vanilla batch
+        vanilla_results = cached_vanilla
+        if vanilla_results is None:
+            print("\n--- Vanilla LLM batch inference ---")
+            t0 = time.time()
+            vanilla_answers = run_offline_batch(llm, vanilla_convos, sampling, chat_template_kwargs=model_cfg.get("chat_template_kwargs"))
+            t_vanilla = time.time() - t0
+            print(f"Vanilla batch completed in {t_vanilla:.1f}s")
+            vanilla_results = [{
+                "question": eval_dataset[i]["question"],
+                "true_answer": eval_dataset[i]["answer"],
+                "source_doc": eval_dataset[i]["source_doc"],
+                "generated_answer": str(a),
+            } for i, a in enumerate(vanilla_answers)]
+            save_phase_results(vanilla_results, vanilla_ckpt, "standard",
+                               elapsed_time=t_vanilla)
+        else:
+            t_vanilla = cached_vanilla_timing.get("elapsed_time") or 0.0
+
+        # 1e — Release GPU
+        print("\nReleasing GPU memory after Phase 1 ...")
+        release_offline_llm(llm)
 
     timing = {
         "model_load_seconds": round(t_load, 2),
@@ -338,7 +417,12 @@ def phase2_agentic(config, eval_dataset, prompt_config, vectordb,
             served_model_name=model_cfg["model_id"],
             port=port,
             api_key=api_key,
-            tensor_parallel_size=model_cfg.get("tensor_parallel_size", 2),
+            tensor_parallel_size=model_cfg.get("tensor_parallel_size", 1),
+            data_parallel_size=model_cfg.get("data_parallel_size"),
+            data_parallel_size_local=model_cfg.get("data_parallel_size_local"),
+            enable_expert_parallel=model_cfg.get("enable_expert_parallel", True),
+            all2all_backend=model_cfg.get("all2all_backend", "allgather_reducescatter"),
+            data_parallel_backend=model_cfg.get("data_parallel_backend", "ray"),
             gpu_memory_utilization=model_cfg.get("gpu_memory_utilization",
                                                  0.92),
             max_model_len=model_cfg.get("phase2_max_model_len",
@@ -347,6 +431,8 @@ def phase2_agentic(config, eval_dataset, prompt_config, vectordb,
             dtype=model_cfg.get("dtype", "auto"),
             trust_remote_code=model_cfg.get("trust_remote_code", True),
             enable_prefix_caching=True,
+            enforce_eager=model_cfg.get("enforce_eager", False),
+            moe_backend=model_cfg.get("moe_backend"),
             extra_args=server_cfg.get("extra_args", []),
             host=server_cfg.get("host", "0.0.0.0"),
             log_dir=server_cfg.get("log_dir"),
@@ -364,6 +450,8 @@ def phase2_agentic(config, eval_dataset, prompt_config, vectordb,
             "temperature": model_cfg.get("temperature", 0.2),
             "request_timeout": async_cfg.get("request_timeout", 90.0),
         }
+        if "top_p" in model_cfg:
+            agent_model_config["top_p"] = model_cfg["top_p"]
 
         concurrency = async_cfg.get("concurrency", 16)
         ckpt_interval = async_cfg.get("checkpoint_interval", 5)
@@ -409,7 +497,7 @@ def phase2_agentic(config, eval_dataset, prompt_config, vectordb,
 # ===================================================================
 
 
-def phase3_judge(config, all_outputs, evaluation_prompt, checkpoints_dir):
+def phase3_judge(config, all_outputs, evaluation_prompt, checkpoints_dir, dp_args=None):
     """
     Phase 3: Offline batch Judge LLM evaluation.
     Loads the judge model, scores *all* system outputs in a single
@@ -446,53 +534,81 @@ def phase3_judge(config, all_outputs, evaluation_prompt, checkpoints_dir):
     judge_path = (os.environ.get("VLLM_JUDGE_MODEL_PATH", "")
                   or eval_cfg.get("model_path", "") or judge_model_id)
 
-    llm = create_offline_llm(
-        model_id=judge_path,
-        tensor_parallel_size=model_cfg.get("tensor_parallel_size", 2),
-        gpu_memory_utilization=model_cfg.get("gpu_memory_utilization", 0.92),
-        # Judge prompts are short (~2K tokens); no need for 131072 context
-        max_model_len=eval_cfg.get("max_model_len", 8192),
-        trust_remote_code=model_cfg.get("trust_remote_code", True),
-        dtype=model_cfg.get("dtype", "auto"),
-        enforce_eager=eval_cfg.get("enforce_eager",
-                                   model_cfg.get("enforce_eager", False)),
-        # Judge model uses its OWN quantization settings (eval_cfg), NOT the
-        # main model's, so FP8 is never accidentally applied to the judge.
-        quantization=eval_cfg.get("quantization"),
-        kv_cache_dtype=eval_cfg.get("kv_cache_dtype"),
-        # Judge-specific cap (independent of the main model's setting).
-        max_num_seqs=eval_cfg.get("max_num_seqs"),
-    )
-
     sampling = SamplingParams(
         temperature=eval_cfg.get("temperature", 0.0),
         max_tokens=eval_cfg.get("max_tokens", 16384),
     )
 
+    judge_dp_size = eval_cfg.get("data_parallel_size", model_cfg.get("data_parallel_size", 1))
     t0_judge = time.time()
-    judge_answers = run_offline_batch(llm, judge_convos, sampling)
-    release_offline_llm(llm)
+    if judge_dp_size > 1:
+        judge_dp_kwargs = dict(
+            model_id=judge_path,
+            data_parallel_size=judge_dp_size,
+            data_parallel_size_local=eval_cfg.get("data_parallel_size_local", model_cfg.get("data_parallel_size_local")),
+            tensor_parallel_size=eval_cfg.get("tensor_parallel_size", model_cfg.get("tensor_parallel_size", 1)),
+            enable_expert_parallel=eval_cfg.get("enable_expert_parallel", model_cfg.get("enable_expert_parallel", True)),
+            all2all_backend=eval_cfg.get("all2all_backend", model_cfg.get("all2all_backend", "allgather_reducescatter")),
+            gpu_memory_utilization=eval_cfg.get("gpu_memory_utilization", 0.92),
+            max_model_len=eval_cfg.get("max_model_len", 8192),
+            trust_remote_code=model_cfg.get("trust_remote_code", True),
+            dtype=eval_cfg.get("dtype", "auto"),
+            enforce_eager=eval_cfg.get("enforce_eager", model_cfg.get("enforce_eager", False)),
+            quantization=eval_cfg.get("quantization"),
+            kv_cache_dtype=eval_cfg.get("kv_cache_dtype"),
+            max_num_seqs=eval_cfg.get("max_num_seqs"),
+            max_num_batched_tokens=eval_cfg.get("max_num_batched_tokens", model_cfg.get("max_num_batched_tokens")),
+            moe_backend=eval_cfg.get("moe_backend", model_cfg.get("moe_backend")),
+            timeout=eval_cfg.get("offline_timeout", 3600),
+            dp_num_nodes=(dp_args or {}).get("dp_num_nodes", 1),
+            dp_node_rank=(dp_args or {}).get("dp_node_rank", 0),
+            dp_master_addr=(dp_args or {}).get("dp_master_addr", "127.0.0.1"),
+            dp_master_port=(dp_args or {}).get("dp_master_port", 13345),
+        )
+        judge_answers = run_offline_dp_batch(conversations=judge_convos, sampling_params=sampling, **judge_dp_kwargs)
+    else:
+        llm = create_offline_llm(
+            model_id=judge_path,
+            tensor_parallel_size=eval_cfg.get("tensor_parallel_size", model_cfg.get("tensor_parallel_size", 1)),
+            gpu_memory_utilization=model_cfg.get("gpu_memory_utilization", 0.92),
+            max_model_len=eval_cfg.get("max_model_len", 8192),
+            trust_remote_code=model_cfg.get("trust_remote_code", True),
+            dtype=model_cfg.get("dtype", "auto"),
+            enforce_eager=eval_cfg.get("enforce_eager",
+                                       model_cfg.get("enforce_eager", False)),
+            quantization=eval_cfg.get("quantization"),
+            kv_cache_dtype=eval_cfg.get("kv_cache_dtype"),
+            max_num_seqs=eval_cfg.get("max_num_seqs"),
+            max_num_batched_tokens=eval_cfg.get("max_num_batched_tokens", model_cfg.get("max_num_batched_tokens")),
+            moe_backend=eval_cfg.get("moe_backend", model_cfg.get("moe_backend")),
+            timeout=eval_cfg.get("offline_timeout", 3600),
+        )
+        judge_answers = run_offline_batch(llm, judge_convos, sampling)
+        release_offline_llm(llm)
     t_judge = time.time() - t0_judge
 
     # Parse "[RESULT]" formatted responses
     judge_results = []
-    for answer, meta in zip(judge_answers, judge_meta):
-        # Use rsplit to split on the LAST "[RESULT]" occurrence, in case
-        # leaked chain-of-thought reasoning contains earlier mentions.
-        parts = answer.rsplit("[RESULT]", 1)
-        if len(parts) == 2:
-            feedback, score = parts[0].strip(), parts[1].strip()
-        else:
-            feedback, score = answer, None
-        judge_results.append({
-            "system_type": meta["system_type"],
-            "idx": meta["idx"],
-            "eval_score_LLM_judge": score,
-            "eval_feedback_LLM_judge": feedback,
-        })
+    if (dp_args or {}).get("dp_node_rank", 0) == 0:
+        for answer, meta in zip(judge_answers, judge_meta):
+            # Use rsplit to split on the LAST "[RESULT]" occurrence, in case
+            # leaked chain-of-thought reasoning contains earlier mentions.
+            parts = answer.rsplit("[RESULT]", 1)
+            if len(parts) == 2:
+                feedback, score = parts[0].strip(), parts[1].strip()
+            else:
+                feedback, score = answer, None
+            judge_results.append({
+                "system_type": meta["system_type"],
+                "idx": meta["idx"],
+                "eval_score_LLM_judge": score,
+                "eval_feedback_LLM_judge": feedback,
+            })
 
-    save_phase_results(judge_results, judge_ckpt, "judge", elapsed_time=t_judge)
-    print(f"\nPhase 3 complete: {len(judge_results)} evaluations")
+        save_phase_results(judge_results, judge_ckpt, "judge", elapsed_time=t_judge)
+        print(f"\nPhase 3 complete: {len(judge_results)} evaluations")
+    else:
+        print(f"\n[DP Node {(dp_args or {}).get('dp_node_rank')}] Phase 3 complete.")
     return judge_results, t_judge
 
 
@@ -508,8 +624,31 @@ def main():
         description="Hybrid Agentic RAG evaluation pipeline")
     parser.add_argument(
         "--config",
-        default="recipes/GLM-4.7-Flash.yaml",
+        default="recipes/GLM-5.3-Flash.yaml",
         help="Path to YAML configuration file",
+    )
+    parser.add_argument(
+        "--dp-node-rank",
+        type=int,
+        default=int(os.environ.get("SLURM_NODEID", os.environ.get("SLURM_PROCID", 0))),
+        help="Node rank for multi-node data parallel offline inference",
+    )
+    parser.add_argument(
+        "--dp-num-nodes",
+        type=int,
+        default=int(os.environ.get("SLURM_NNODES", 1)),
+        help="Total number of nodes for data parallel offline inference",
+    )
+    parser.add_argument(
+        "--dp-master-addr",
+        default=os.environ.get("HEAD_NODE_IP", os.environ.get("MASTER_ADDR", "127.0.0.1")),
+        help="Master node IP address for DP coordination",
+    )
+    parser.add_argument(
+        "--dp-master-port",
+        type=int,
+        default=int(os.environ.get("DP_MASTER_PORT", 13345)),
+        help="Master node port for DP coordination",
     )
     parser.add_argument(
         "--test",
@@ -530,9 +669,9 @@ def main():
     )
     parser.add_argument(
         "--embedding-device",
-        default="cuda",
+        default="cpu",
         choices=["cpu", "cuda"],
-        help="Device to use for embedding model (default: cuda)",
+        help="Device to use for embedding model (default: cpu)",
     )
     args = parser.parse_args()
 
@@ -599,11 +738,18 @@ def main():
     with open(eval_prompt_path, "r", encoding="utf-8") as f:
         evaluation_prompt = yaml.safe_load(f)
 
+    dp_args = {
+        "dp_node_rank": args.dp_node_rank,
+        "dp_num_nodes": args.dp_num_nodes,
+        "dp_master_addr": args.dp_master_addr,
+        "dp_master_port": args.dp_master_port,
+    }
+
     # ==================================================================
     #  Phase 1 — Offline Batch (Standard RAG + Vanilla)
     # ==================================================================
     rag_results, vanilla_results, phase1_timing = phase1_offline_batch(
-        config, eval_dataset, retriever_tool, CHECKPOINTS_DIR)
+        config, eval_dataset, retriever_tool, CHECKPOINTS_DIR, dp_args=dp_args)
 
     # GPU cleanup between Phase 1 and Phase 2
     _gpu_cleanup("Phase 1")
@@ -611,9 +757,19 @@ def main():
     # ==================================================================
     #  Phase 2 — Async Agentic RAG
     # ==================================================================
-    agentic_results, phase2_timing = phase2_agentic(config, eval_dataset,
-                                                    prompt_config, vectordb,
-                                                    CHECKPOINTS_DIR)
+    if dp_args.get("dp_node_rank", 0) == 0:
+        agentic_results, phase2_timing = phase2_agentic(config, eval_dataset,
+                                                        prompt_config, vectordb,
+                                                        CHECKPOINTS_DIR)
+    else:
+        # Worker nodes: wait for Head node to complete Phase 2
+        # (vLLM server started by Head node uses Ray workers across all nodes)
+        summary_ckpt = CHECKPOINTS_DIR / f"{model_name}_phase2_summary.json"
+        print(f"\n[DP Node {dp_args['dp_node_rank']}] Waiting for Phase 2 to complete on head node...")
+        while not summary_ckpt.exists():
+            time.sleep(3)
+        print(f"[DP Node {dp_args['dp_node_rank']}] Phase 2 completion detected.")
+        agentic_results, phase2_timing = [], {}
 
     # GPU cleanup between Phase 2 and Phase 3
     _gpu_cleanup("Phase 2")
@@ -621,6 +777,18 @@ def main():
     # ==================================================================
     #  Phase 3 — Offline Judge Evaluation
     # ==================================================================
+    if dp_args.get("dp_node_rank", 0) != 0:
+        # Load Phase 1 & 2 results from shared checkpoints so prompt building matches head node
+        rag_ckpt = CHECKPOINTS_DIR / f"{model_name}_phase1_rag.json"
+        vanilla_ckpt = CHECKPOINTS_DIR / f"{model_name}_phase1_vanilla.json"
+        summary_ckpt = CHECKPOINTS_DIR / f"{model_name}_phase2_summary.json"
+        cached_rag = load_phase_results(rag_ckpt)
+        cached_vanilla = load_phase_results(vanilla_ckpt)
+        cached_agentic = load_phase_results(summary_ckpt)
+        rag_results = cached_rag[0] if cached_rag else []
+        vanilla_results = cached_vanilla[0] if cached_vanilla else []
+        agentic_results = cached_agentic[0] if cached_agentic else []
+
     all_outputs = {
         "agentic_rag": agentic_results,
         "standard_rag": rag_results,
@@ -628,7 +796,11 @@ def main():
     }
 
     judge_results, t_phase3_elapsed = phase3_judge(
-        config, all_outputs, evaluation_prompt["prompt"], CHECKPOINTS_DIR)
+        config, all_outputs, evaluation_prompt["prompt"], CHECKPOINTS_DIR, dp_args=dp_args)
+
+    if dp_args.get("dp_node_rank", 0) != 0:
+        print(f"\n[DP Node {dp_args['dp_node_rank']}] Pipeline finished successfully.")
+        return
 
     # ==================================================================
     #  Scoring & Results
@@ -731,6 +903,18 @@ def main():
             "max_model_len":
             model_cfg.get("phase2_max_model_len",
                           model_cfg.get("max_model_len")),
+            "tensor_parallel_size":
+            model_cfg.get("tensor_parallel_size"),
+            "data_parallel_size":
+            model_cfg.get("data_parallel_size"),
+            "data_parallel_size_local":
+            model_cfg.get("data_parallel_size_local"),
+            "enable_expert_parallel":
+            model_cfg.get("enable_expert_parallel"),
+            "all2all_backend":
+            model_cfg.get("all2all_backend"),
+            "data_parallel_backend":
+            model_cfg.get("data_parallel_backend", "ray"),
         },
         "async": {
             "concurrency": async_cfg.get("concurrency"),

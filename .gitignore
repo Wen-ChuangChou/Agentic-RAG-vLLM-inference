@@ -10,6 +10,7 @@ tests/
 *pycache*
 .env
 .vscode
+.cache
 
 *.ipynb text eol=lf
 *.py     text eol=lf
