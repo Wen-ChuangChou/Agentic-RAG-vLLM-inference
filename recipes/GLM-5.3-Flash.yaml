@@ -24,11 +24,12 @@ model:
   max_num_batched_tokens: 8192
   dtype: "auto"
   trust_remote_code: true
+  attention_backend: "FLASHINFER"
   chat_template_kwargs:
     clear_thinking: true  
   temperature: 1.0                          # GLM-5.3 recommended reasoning temperature
   top_p: 0.95  
-  max_tokens: 4096
+  max_tokens: 1024
   enforce_eager: true                       # Workaround for Hopper TMA descriptor crash
   moe_backend: "deep_gemm"                  # Use DeepGEMM to prevent 56-min CUTLASS JIT compilation
   offline_timeout: 3600
@@ -39,7 +40,7 @@ server:
   port: 8000
   api_key: "ai4all"
   host: "0.0.0.0"
-  extra_args: ["--enforce-eager", "--moe-backend", "deep_gemm", "--default-chat-template-kwargs", '{"clear_thinking": true}']
+  extra_args: ["--enforce-eager", "--moe-backend", "deep_gemm", "--attention-backend", "FLASHINFER", "--reasoning-parser", "glm45", "--default-chat-template-kwargs", '{"clear_thinking": true}']
 
 # === Evaluation judge model (Phase 3) ===
 evaluation:
@@ -50,6 +51,7 @@ evaluation:
   data_parallel_size_local: 4
   enable_expert_parallel: true
   all2all_backend: "allgather_reducescatter"
+  attention_backend: "FLASHINFER"
   gpu_memory_utilization: 0.95
   temperature: 0.0
   max_model_len: 8192

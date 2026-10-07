@@ -43,6 +43,8 @@ def create_offline_llm(
     max_num_seqs: Optional[int] = None,
     max_num_batched_tokens: Optional[int] = None,
     moe_backend: Optional[str] = None,
+    attention_backend: Optional[str] = None,
+    **kwargs_extra,
 ) -> LLM:
     """Create a vLLM offline LLM instance for batch processing.
 
@@ -69,6 +71,8 @@ def create_offline_llm(
         kwargs["max_num_batched_tokens"] = max_num_batched_tokens
     if moe_backend is not None:
         kwargs["moe_backend"] = moe_backend
+    if attention_backend is not None:
+        kwargs["attention_backend"] = attention_backend
     return LLM(**kwargs)
 
 
@@ -329,6 +333,7 @@ def run_offline_dp_batch(
     max_num_seqs: Optional[int] = None,
     max_num_batched_tokens: Optional[int] = None,
     moe_backend: Optional[str] = None,
+    attention_backend: Optional[str] = None,
     dp_num_nodes: int = 1,
     dp_node_rank: int = 0,
     dp_master_addr: str = "127.0.0.1",
@@ -359,6 +364,7 @@ def run_offline_dp_batch(
             max_num_seqs=max_num_seqs,
             max_num_batched_tokens=max_num_batched_tokens,
             moe_backend=moe_backend,
+            attention_backend=attention_backend,
         )
         try:
             return run_offline_batch(
@@ -398,6 +404,8 @@ def run_offline_dp_batch(
         engine_kwargs["max_num_batched_tokens"] = max_num_batched_tokens
     if moe_backend is not None:
         engine_kwargs["moe_backend"] = moe_backend
+    if attention_backend is not None:
+        engine_kwargs["attention_backend"] = attention_backend
 
     dp_per_node = data_parallel_size_local or (data_parallel_size // max(dp_num_nodes, 1))
     start_global_rank = dp_node_rank * dp_per_node

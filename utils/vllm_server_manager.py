@@ -56,6 +56,7 @@ class VLLMServerManager:
         enable_prefix_caching: bool = True,
         enforce_eager: bool = False,
         moe_backend: Optional[str] = None,
+        attention_backend: Optional[str] = None,
         extra_args: Optional[List[str]] = None,
         health_timeout: int = 600,
         health_poll_interval: int = 10,
@@ -81,6 +82,7 @@ class VLLMServerManager:
         self.enable_prefix_caching = enable_prefix_caching
         self.enforce_eager = enforce_eager
         self.moe_backend = moe_backend
+        self.attention_backend = attention_backend
         self.extra_args = extra_args or []
         self.health_timeout = health_timeout
         self.health_poll_interval = health_poll_interval
@@ -130,6 +132,8 @@ class VLLMServerManager:
             cmd.append("--enforce-eager")
         if self.moe_backend:
             cmd.extend(["--moe-backend", str(self.moe_backend)])
+        if self.attention_backend and "--attention-backend" not in self.extra_args:
+            cmd.extend(["--attention-backend", str(self.attention_backend)])
             
         cmd.append("--disable-custom-all-reduce")
         cmd.extend(self.extra_args)
