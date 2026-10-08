@@ -31,7 +31,7 @@ model:
   top_p: 0.95  
   max_tokens: 1024
   enforce_eager: true                       # Workaround for Hopper TMA descriptor crash
-  moe_backend: "deep_gemm"                  # Use DeepGEMM to prevent 56-min CUTLASS JIT compilation
+  moe_backend: "triton"                     # Use Triton MoE to prevent DeepGEMM NaN/exclamation mark bug
   offline_timeout: 3600
 
 # === vLLM server settings (Phase 2 only) ===
@@ -40,7 +40,7 @@ server:
   port: 8000
   api_key: "ai4all"
   host: "0.0.0.0"
-  extra_args: ["--enforce-eager", "--moe-backend", "deep_gemm", "--attention-backend", "FLASHINFER", "--reasoning-parser", "glm45", "--default-chat-template-kwargs", '{"clear_thinking": true}']
+  extra_args: ["--reasoning-parser", "glm45", "--default-chat-template-kwargs", '{"clear_thinking": true}']
 
 # === Evaluation judge model (Phase 3) ===
 evaluation:

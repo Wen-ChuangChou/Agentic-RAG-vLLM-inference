@@ -108,9 +108,7 @@ trap cleanup_job_tmp EXIT
 module purge
 module load release/25.06 GCCcore/13.3.0 Python/3.12.3 CUDA/13.0.0
 RAG_PYTHON="${PWD}/.venv/bin/python"
-# MoE backend configuration: Prefer DeepGEMM to bypass 56-minute CUTLASS JIT compilation
-export VLLM_MOE_USE_DEEP_GEMM=1
-export VLLM_USE_DEEP_GEMM=1
+# MoE backend configuration is dynamically configured below after loading RAG_CONFIG
 
 # FlashInfer compilation workspace directory
 if [[ "${USE_LOCAL_ENV}" == "true" ]]; then
@@ -159,6 +157,18 @@ JUDGE_MODEL_PATH="${VLLM_JUDGE_MODEL_PATH:-$(${RAG_PYTHON} -c "import yaml; prin
 DP_BACKEND="$(${RAG_PYTHON} -c "import yaml; print(yaml.safe_load(open('${RAG_CONFIG}')).get('model', {}).get('data_parallel_backend', ''))")"
 DP_SIZE="$(${RAG_PYTHON} -c "import yaml; print(yaml.safe_load(open('${RAG_CONFIG}')).get('model', {}).get('data_parallel_size', 1))")"
 DP_SIZE_LOCAL="$(${RAG_PYTHON} -c "import yaml; print(yaml.safe_load(open('${RAG_CONFIG}')).get('model', {}).get('data_parallel_size_local', 4))")"
+
+# MoE backend configuration: detect recipe preference
+MOE_BACKEND="$(${RAG_PYTHON} -c "import yaml; print(yaml.safe_load(open('${RAG_CONFIG}')).get('model', {}).get('moe_backend', ''))")"
+if [ "${MOE_BACKEND}" = "triton" ]; then
+    echo "MoE backend: Triton requested by recipe. Disabling DeepGEMM."
+    export VLLM_MOE_USE_DEEP_GEMM=0
+    export VLLM_USE_DEEP_GEMM=0
+else
+    # Default to DeepGEMM to bypass 56-minute CUTLASS JIT compilation where supported
+    export VLLM_MOE_USE_DEEP_GEMM=1
+    export VLLM_USE_DEEP_GEMM=1
+fi
 
 NUM_NODES=${SLURM_NNODES:-1}
 REQUIRED_NODES=$(( (DP_SIZE + DP_SIZE_LOCAL - 1) / DP_SIZE_LOCAL ))
@@ -218,6 +228,7 @@ echo " Judge:             ${JUDGE_MODEL}"
 echo " Config:            ${RAG_CONFIG}"
 echo " DP Size:           ${DP_SIZE}"
 echo " DP Backend:        ${DP_BACKEND:-none}"
+echo " MoE Backend:       ${MOE_BACKEND:-default} (VLLM_MOE_USE_DEEP_GEMM=${VLLM_MOE_USE_DEEP_GEMM})"
 echo " NVMe staging:      ${USE_NVME}"
 echo " Local Python env:  ${USE_LOCAL_ENV}"
 if [ "${DP_BACKEND}" = "ray" ] || [ "${NUM_NODES}" -gt 1 ]; then
