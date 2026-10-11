@@ -3,13 +3,12 @@ dev/
 checkpoints/
 vectordb/
 doc/
-.venv/
 logs/
 tests/
 docs/
 .gradio
 *pycache*
-.env
+.venv*
 .vscode
 .cache
 

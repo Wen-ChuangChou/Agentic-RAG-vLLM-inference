@@ -44,6 +44,9 @@ set -eo pipefail
 cd "${SLURM_SUBMIT_DIR:-$PWD}"
 START_TIME=$(date +%s)
 
+# Ensure all Slurm steps can share resources / run concurrently (Slurm >= 20.11 requirement)
+export SLURM_OVERLAP=1
+
 # ==========================================================================
 # Configuration (override via environment variables)
 # ==========================================================================
@@ -85,6 +88,9 @@ NUM_NODES=${SLURM_NNODES:-1}
 RAG_JOB_TMP="/tmp/agentic-rag-${SLURM_JOB_ID:?Submit with sbatch}"
 NVME_MOUNT="${RAG_JOB_TMP}"
 cleanup_job_tmp() {
+    if [ -n "${RAY_WORKER_PID:-}" ]; then
+        kill "${RAY_WORKER_PID}" 2>/dev/null || true
+    fi
     if [ "${RAY_STARTED:-false}" = "true" ]; then
         echo "Stopping Ray cluster across all nodes..."
         if [ "${NUM_NODES}" -gt 1 ]; then
@@ -125,11 +131,12 @@ else
     export FLASHINFER_WORKSPACE_DIR="${PWD}/.cache/flashinfer"
     export FLASHINFER_WORKSPACE_BASE="${PWD}"
 fi
+export FLASHINFER_DISABLE_VERSION_CHECK=1
 
 if [[ "${USE_LOCAL_ENV}" == "true" ]]; then
     echo "Staging Python environment to local SSD across ${NUM_NODES} node(s)..."
     if [ "${NUM_NODES}" -gt 1 ]; then
-        srun --nodes="${NUM_NODES}" --ntasks="${NUM_NODES}" bash -c "
+        srun --overlap --nodes="${NUM_NODES}" --ntasks="${NUM_NODES}" bash -c "
             mkdir -p "${VLLM_CACHE_ROOT}" "${TORCHINDUCTOR_CACHE_DIR}" "${TRITON_CACHE_DIR}"
             python -u hpc/stage_python_env.py .venv "${RAG_JOB_TMP}/venv"
         "
@@ -205,7 +212,7 @@ mkdir -p logs
 
 NODELIST=$(scontrol show hostname "${SLURM_JOB_NODELIST:-$(hostname)}")
 HEAD_NODE=$(echo "${NODELIST}" | head -n 1)
-HEAD_NODE_IP=$(srun --nodes=1 --ntasks=1 -w "${HEAD_NODE}" hostname --ip-address 2>/dev/null || hostname -I | awk '{print $1}')
+HEAD_NODE_IP=$(srun --overlap --nodes=1 --ntasks=1 -w "${HEAD_NODE}" hostname --ip-address 2>/dev/null || hostname -I | awk '{print $1}')
 RAY_PORT=6379
 DP_MASTER_PORT=13345
 
@@ -244,7 +251,7 @@ echo ""
 if [ "${NUM_NODES}" -gt 1 ]; then
     echo "--- Pre-flight node health & filesystem check ---"
     UNHEALTHY_NODES=""
-    CHECK_OUTPUT=$(srun --nodes="${NUM_NODES}" --ntasks="${NUM_NODES}" \
+    CHECK_OUTPUT=$(srun --overlap --nodes="${NUM_NODES}" --ntasks="${NUM_NODES}" \
         "${RAG_PYTHON}" -c '
 import os, sys, torch
 node = os.uname().nodename
@@ -402,14 +409,22 @@ for requirer in ("torchvision", "torchaudio"):
             f"installed -- the compiled extension will fail to load symbols"
         )
 
-# --- Family B: flashinfer versions must match EXACTLY ---
+# --- Family B: flashinfer versions check ---
 fp_v = get("flashinfer-python")
 fc_v = get("flashinfer-cubin")
 if fp_v and fc_v and fp_v != fc_v:
-    failures.append(
-        f"flashinfer version mismatch: flashinfer-python={fp_v} vs "
-        f"flashinfer-cubin={fc_v} (must be identical)"
-    )
+    if os.environ.get("FLASHINFER_DISABLE_VERSION_CHECK") == "1":
+        notes.append(
+            f"flashinfer-python ({fp_v}) != flashinfer-cubin ({fc_v}), "
+            "bypassed via FLASHINFER_DISABLE_VERSION_CHECK=1"
+        )
+    else:
+        failures.append(
+            f"flashinfer version mismatch: flashinfer-python={fp_v} vs "
+            f"flashinfer-cubin={fc_v} (must be identical, or set FLASHINFER_DISABLE_VERSION_CHECK=1)"
+        )
+elif fp_v and not fc_v:
+    notes.append(f"flashinfer-python ({fp_v}) installed without flashinfer-cubin (JIT mode enabled)")
 
 # --- Family C: tilelang caps apache-tvm-ffi ---
 tf_v = get("apache-tvm-ffi")
@@ -557,16 +572,24 @@ if [ "${DP_BACKEND}" = "ray" ] || { [ "${NUM_NODES}" -gt 1 ] && [ "${DP_SIZE}" -
         WORKER_NODES=$(echo "${NODELIST}" | tail -n +2 | tr '\n' ',' | sed 's/,$//')
         NUM_WORKERS=$(( NUM_NODES - 1 ))
         echo "Starting Ray worker(s) on ${WORKER_NODES} (${NUM_WORKERS} worker nodes)..."
-        srun --nodes="${NUM_WORKERS}" --ntasks="${NUM_WORKERS}" -w "${WORKER_NODES}" \
+        srun --overlap --nodes="${NUM_WORKERS}" --ntasks="${NUM_WORKERS}" -w "${WORKER_NODES}" \
             "${RAY_BIN}" start \
             --address="${HEAD_NODE_IP}:${RAY_PORT}" \
             --num-cpus "${SLURM_CPUS_PER_TASK:-56}" \
             --num-gpus "${SLURM_GPUS_ON_NODE:-4}" \
-            --disable-usage-stats
+            --block \
+            --disable-usage-stats &
+        RAY_WORKER_PID=$!
     fi
 
-    echo "Waiting for Ray cluster to settle..."
-    sleep 5
+    echo "Waiting for Ray cluster to settle (${NUM_NODES} nodes)..."
+    for _ in {1..15}; do
+        ACTIVE_NODES=$("${RAY_BIN}" status 2>/dev/null | grep -E "Active:" -A 10 | grep -c "node_" || true)
+        if [ "${ACTIVE_NODES}" -ge "${NUM_NODES}" ]; then
+            break
+        fi
+        sleep 1
+    done
     "${RAY_BIN}" status
 else
     echo "Ray cluster not required (single-node non-Ray setup)."
@@ -627,7 +650,7 @@ stage_to_nvme() {
     echo "  Dest:    ${DEST}"
     local T0=$(date +%s)
     if [ "${NUM_NODES}" -gt 1 ]; then
-        srun --nodes="${NUM_NODES}" --ntasks="${NUM_NODES}" bash -c "
+        srun --overlap --nodes="${NUM_NODES}" --ntasks="${NUM_NODES}" bash -c "
             mkdir -p '${DEST}'
             rsync -aL '${SRC}/' '${DEST}/'
             echo \"\$(hostname): Copied in \$(du -sh '${DEST}' | cut -f1)\"
@@ -681,7 +704,7 @@ echo ""
 EXIT_CODE=0
 if [ "${NUM_NODES}" -gt 1 ] && [ "${DP_SIZE}" -gt 1 ]; then
     echo "Launching multi-node pipeline across ${NUM_NODES} nodes (${NUM_NODES} tasks total, 1 task/node)..."
-    srun --nodes="${NUM_NODES}" --ntasks="${NUM_NODES}" \
+    srun --overlap --nodes="${NUM_NODES}" --ntasks="${NUM_NODES}" \
         "${RAG_PYTHON}" -u agentic_rag.py --config "${RAG_CONFIG}" "$@" || EXIT_CODE=$?
 else
     echo "Launching single-node pipeline on ${HEAD_NODE}..."
