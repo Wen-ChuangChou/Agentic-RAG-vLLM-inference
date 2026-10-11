@@ -46,6 +46,8 @@ START_TIME=$(date +%s)
 
 # Ensure all Slurm steps can share resources / run concurrently (Slurm >= 20.11 requirement)
 export SLURM_OVERLAP=1
+# Prevent Slurm cgroups from restricting GPU visibility based on CPU/NUMA socket binding
+export SLURM_GRES_FLAGS="disable-binding"
 
 # ==========================================================================
 # Configuration (override via environment variables)
@@ -252,6 +254,8 @@ if [ "${NUM_NODES}" -gt 1 ]; then
     echo "--- Pre-flight node health & filesystem check ---"
     UNHEALTHY_NODES=""
     CHECK_OUTPUT=$(srun --overlap --nodes="${NUM_NODES}" --ntasks="${NUM_NODES}" \
+        --cpus-per-task="${SLURM_CPUS_PER_TASK:-56}" \
+        --gres-flags=disable-binding \
         "${RAG_PYTHON}" -c '
 import os, sys, torch
 node = os.uname().nodename
@@ -573,6 +577,8 @@ if [ "${DP_BACKEND}" = "ray" ] || { [ "${NUM_NODES}" -gt 1 ] && [ "${DP_SIZE}" -
         NUM_WORKERS=$(( NUM_NODES - 1 ))
         echo "Starting Ray worker(s) on ${WORKER_NODES} (${NUM_WORKERS} worker nodes)..."
         srun --overlap --nodes="${NUM_WORKERS}" --ntasks="${NUM_WORKERS}" -w "${WORKER_NODES}" \
+            --cpus-per-task="${SLURM_CPUS_PER_TASK:-56}" \
+            --gres-flags=disable-binding \
             "${RAY_BIN}" start \
             --address="${HEAD_NODE_IP}:${RAY_PORT}" \
             --num-cpus "${SLURM_CPUS_PER_TASK:-56}" \
@@ -705,6 +711,8 @@ EXIT_CODE=0
 if [ "${NUM_NODES}" -gt 1 ] && [ "${DP_SIZE}" -gt 1 ]; then
     echo "Launching multi-node pipeline across ${NUM_NODES} nodes (${NUM_NODES} tasks total, 1 task/node)..."
     srun --overlap --nodes="${NUM_NODES}" --ntasks="${NUM_NODES}" \
+        --cpus-per-task="${SLURM_CPUS_PER_TASK:-56}" \
+        --gres-flags=disable-binding \
         "${RAG_PYTHON}" -u agentic_rag.py --config "${RAG_CONFIG}" "$@" || EXIT_CODE=$?
 else
     echo "Launching single-node pipeline on ${HEAD_NODE}..."
