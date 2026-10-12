@@ -47,10 +47,6 @@ START_TIME=$(date +%s)
 # Clear any inherited GPU restrictions from login/submission environment
 unset CUDA_VISIBLE_DEVICES
 
-# Ensure all Slurm steps can share resources / run concurrently (Slurm >= 20.11 requirement)
-export SLURM_OVERLAP=1
-# Prevent Slurm cgroups from restricting GPU visibility based on CPU/NUMA socket binding
-export SLURM_GRES_FLAGS="disable-binding"
 
 # ==========================================================================
 # Configuration (override via environment variables)
@@ -99,14 +95,14 @@ cleanup_job_tmp() {
     if [ "${RAY_STARTED:-false}" = "true" ]; then
         echo "Stopping Ray cluster across all nodes..."
         if [ "${NUM_NODES}" -gt 1 ]; then
-            srun --overlap --nodes="${NUM_NODES}" --ntasks="${NUM_NODES}" "${RAY_BIN:-ray}" stop --force 2>/dev/null || true
+            srun --nodes="${NUM_NODES}" --ntasks="${NUM_NODES}" "${RAY_BIN:-ray}" stop --force 2>/dev/null || true
         else
             "${RAY_BIN:-ray}" stop --force 2>/dev/null || true
         fi
     fi
     echo "Removing job-local files across all nodes: ${RAG_JOB_TMP}"
     if [ "${NUM_NODES}" -gt 1 ]; then
-        srun --overlap --nodes="${NUM_NODES}" --ntasks="${NUM_NODES}" rm -rf -- "${RAG_JOB_TMP}" 2>/dev/null || true
+        srun --nodes="${NUM_NODES}" --ntasks="${NUM_NODES}" rm -rf -- "${RAG_JOB_TMP}" 2>/dev/null || true
     else
         rm -rf -- "${RAG_JOB_TMP}" 2>/dev/null || true
     fi
@@ -141,7 +137,7 @@ export FLASHINFER_DISABLE_VERSION_CHECK=1
 if [[ "${USE_LOCAL_ENV}" == "true" ]]; then
     echo "Staging Python environment to local SSD across ${NUM_NODES} node(s)..."
     if [ "${NUM_NODES}" -gt 1 ]; then
-        srun --overlap --nodes="${NUM_NODES}" --ntasks="${NUM_NODES}" bash -c "
+        srun --nodes="${NUM_NODES}" --ntasks="${NUM_NODES}" bash -c "
             mkdir -p "${VLLM_CACHE_ROOT}" "${TORCHINDUCTOR_CACHE_DIR}" "${TRITON_CACHE_DIR}"
             python -u hpc/stage_python_env.py .venv "${RAG_JOB_TMP}/venv"
         "
@@ -217,7 +213,7 @@ mkdir -p logs
 
 NODELIST=$(scontrol show hostname "${SLURM_JOB_NODELIST:-$(hostname)}")
 HEAD_NODE=$(echo "${NODELIST}" | head -n 1)
-HEAD_NODE_IP=$(srun --overlap --nodes=1 --ntasks=1 -w "${HEAD_NODE}" hostname --ip-address 2>/dev/null || hostname -I | awk '{print $1}')
+HEAD_NODE_IP=$(srun --nodes=1 --ntasks=1 -w "${HEAD_NODE}" hostname --ip-address 2>/dev/null || hostname -I | awk '{print $1}')
 RAY_PORT=6379
 DP_MASTER_PORT=13345
 
@@ -256,11 +252,7 @@ echo ""
 if [ "${NUM_NODES}" -gt 1 ]; then
     echo "--- Pre-flight node health & filesystem check ---"
     UNHEALTHY_NODES=""
-    CHECK_OUTPUT=$(srun --overlap --nodes="${NUM_NODES}" --ntasks="${NUM_NODES}" \
-        --cpus-per-task="${SLURM_CPUS_PER_TASK:-56}" \
-        --cpu-bind=none \
-        --gres-flags=disable-binding \
-        --gpus-per-node="${SLURM_GPUS_ON_NODE:-4}" \
+    CHECK_OUTPUT=$(srun --nodes="${NUM_NODES}" --ntasks="${NUM_NODES}" \
         "${RAG_PYTHON}" -c '
 import os, sys, torch
 node = os.uname().nodename
@@ -581,18 +573,12 @@ if [ "${DP_BACKEND}" = "ray" ] || { [ "${NUM_NODES}" -gt 1 ] && [ "${DP_SIZE}" -
         WORKER_NODES=$(echo "${NODELIST}" | tail -n +2 | tr '\n' ',' | sed 's/,$//')
         NUM_WORKERS=$(( NUM_NODES - 1 ))
         echo "Starting Ray worker(s) on ${WORKER_NODES} (${NUM_WORKERS} worker nodes)..."
-        srun --overlap --nodes="${NUM_WORKERS}" --ntasks="${NUM_WORKERS}" -w "${WORKER_NODES}" \
-            --cpus-per-task="${SLURM_CPUS_PER_TASK:-56}" \
-            --cpu-bind=none \
-            --gres-flags=disable-binding \
-            --gpus-per-node="${SLURM_GPUS_ON_NODE:-4}" \
+        srun --nodes="${NUM_WORKERS}" --ntasks="${NUM_WORKERS}" -w "${WORKER_NODES}" \
             "${RAY_BIN}" start \
             --address="${HEAD_NODE_IP}:${RAY_PORT}" \
             --num-cpus "${SLURM_CPUS_PER_TASK:-56}" \
             --num-gpus "${SLURM_GPUS_ON_NODE:-4}" \
-            --block \
-            --disable-usage-stats &
-        RAY_WORKER_PID=$!
+            --disable-usage-stats
     fi
 
     echo "Waiting for Ray cluster to settle (${NUM_NODES} nodes)..."
@@ -663,7 +649,7 @@ stage_to_nvme() {
     echo "  Dest:    ${DEST}"
     local T0=$(date +%s)
     if [ "${NUM_NODES}" -gt 1 ]; then
-        srun --overlap --nodes="${NUM_NODES}" --ntasks="${NUM_NODES}" bash -c "
+        srun --nodes="${NUM_NODES}" --ntasks="${NUM_NODES}" bash -c "
             mkdir -p '${DEST}'
             rsync -aL '${SRC}/' '${DEST}/'
             echo \"\$(hostname): Copied in \$(du -sh '${DEST}' | cut -f1)\"
@@ -717,11 +703,7 @@ echo ""
 EXIT_CODE=0
 if [ "${NUM_NODES}" -gt 1 ] && [ "${DP_SIZE}" -gt 1 ]; then
     echo "Launching multi-node pipeline across ${NUM_NODES} nodes (${NUM_NODES} tasks total, 1 task/node)..."
-    srun --overlap --nodes="${NUM_NODES}" --ntasks="${NUM_NODES}" \
-        --cpus-per-task="${SLURM_CPUS_PER_TASK:-56}" \
-        --cpu-bind=none \
-        --gres-flags=disable-binding \
-        --gpus-per-node="${SLURM_GPUS_ON_NODE:-4}" \
+    srun --nodes="${NUM_NODES}" --ntasks="${NUM_NODES}" \
         "${RAG_PYTHON}" -u agentic_rag.py --config "${RAG_CONFIG}" "$@" || EXIT_CODE=$?
 else
     echo "Launching single-node pipeline on ${HEAD_NODE}..."
