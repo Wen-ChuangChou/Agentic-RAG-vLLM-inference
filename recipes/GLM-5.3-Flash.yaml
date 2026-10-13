@@ -48,14 +48,11 @@ evaluation:
   tensor_parallel_size: 1
   data_parallel_size: 8
   data_parallel_size_local: 4
-  enable_expert_parallel: true
-  all2all_backend: "allgather_reducescatter"
   gpu_memory_utilization: 0.95
   temperature: 0.0
   max_model_len: 8192
   max_tokens: 4096
   enforce_eager: true
-  moe_backend: "deep_gemm"
   offline_timeout: 3600
 
 # === Async agentic settings (Phase 2) ===
