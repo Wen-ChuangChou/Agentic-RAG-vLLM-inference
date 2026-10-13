@@ -95,10 +95,12 @@ cleanup_job_tmp() {
     if [ "${RAY_STARTED:-false}" = "true" ]; then
         echo "Stopping Ray cluster across all nodes..."
         if [ "${NUM_NODES}" -gt 1 ]; then
-            srun --nodes="${NUM_NODES}" --ntasks="${NUM_NODES}" "${RAY_BIN:-ray}" stop --force 2>/dev/null || true
-        else
-            "${RAY_BIN:-ray}" stop --force 2>/dev/null || true
+            for WORKER in $(echo "${NODELIST}" | tail -n +2); do
+                ssh -o BatchMode=yes -o StrictHostKeyChecking=no "${WORKER}" \
+                    "'${RAY_BIN:-ray}' stop --force" 2>/dev/null || true
+            done
         fi
+        "${RAY_BIN:-ray}" stop --force 2>/dev/null || true
     fi
     echo "Removing job-local files across all nodes: ${RAG_JOB_TMP}"
     if [ "${NUM_NODES}" -gt 1 ]; then
@@ -570,15 +572,16 @@ if [ "${DP_BACKEND}" = "ray" ] || { [ "${NUM_NODES}" -gt 1 ] && [ "${DP_SIZE}" -
         --disable-usage-stats
 
     if [ "${NUM_NODES}" -gt 1 ]; then
-        WORKER_NODES=$(echo "${NODELIST}" | tail -n +2 | tr '\n' ',' | sed 's/,$//')
-        NUM_WORKERS=$(( NUM_NODES - 1 ))
-        echo "Starting Ray worker(s) on ${WORKER_NODES} (${NUM_WORKERS} worker nodes)..."
-        srun --nodes="${NUM_WORKERS}" --ntasks="${NUM_WORKERS}" -w "${WORKER_NODES}" \
-            "${RAY_BIN}" start \
-            --address="${HEAD_NODE_IP}:${RAY_PORT}" \
-            --num-cpus "${SLURM_CPUS_PER_TASK:-56}" \
-            --num-gpus "${SLURM_GPUS_ON_NODE:-4}" \
-            --disable-usage-stats
+        WORKER_NODES=$(echo "${NODELIST}" | tail -n +2)
+        echo "Starting Ray worker(s) on ${WORKER_NODES} via SSH daemonization..."
+        for WORKER in ${WORKER_NODES}; do
+            ssh -o BatchMode=yes -o StrictHostKeyChecking=no "${WORKER}" \
+                "CUDA_VISIBLE_DEVICES=0,1,2,3 '${RAY_BIN}' start \
+                    --address='${HEAD_NODE_IP}:${RAY_PORT}' \
+                    --num-cpus='${SLURM_CPUS_PER_TASK:-56}' \
+                    --num-gpus='${SLURM_GPUS_ON_NODE:-4}' \
+                    --disable-usage-stats"
+        done
     fi
 
     echo "Waiting for Ray cluster to settle (${NUM_NODES} nodes)..."

@@ -413,6 +413,27 @@ def phase2_agentic(config, eval_dataset, prompt_config, vectordb,
     port = server_cfg.get("port", 8000)
     api_key = server_cfg.get("api_key", "ai4all")
 
+    if model_cfg.get("data_parallel_backend") == "ray":
+        try:
+            import ray
+            if not ray.is_initialized():
+                ray.init(address="auto", ignore_reinit_error=True)
+            resources = ray.cluster_resources()
+            avail_gpus = int(resources.get("GPU", 0))
+            req_gpus = model_cfg.get("data_parallel_size", 1) * model_cfg.get("tensor_parallel_size", 1)
+            print(f"[Ray Cluster Pre-check] Available GPUs in cluster: {avail_gpus}, Required: {req_gpus}")
+            if avail_gpus < req_gpus:
+                raise RuntimeError(
+                    f"Ray cluster has only {avail_gpus} GPUs available across active nodes, but {req_gpus} "
+                    f"are required (data_parallel_size={model_cfg.get('data_parallel_size')}, "
+                    f"tensor_parallel_size={model_cfg.get('tensor_parallel_size', 1)}). "
+                    f"Cluster resources: {resources}"
+                )
+        except Exception as e:
+            if isinstance(e, RuntimeError):
+                raise
+            print(f"[Ray Cluster Pre-check Warning] Could not query Ray resources: {e}")
+
     t_server_start = time.time()
     with VLLMServerManager(
             model_id=model_id,
