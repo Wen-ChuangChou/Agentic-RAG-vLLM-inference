@@ -16,10 +16,10 @@ model:
   enable_expert_parallel: true
   all2all_backend: "allgather_reducescatter"
   data_parallel_backend: "ray"
-  gpu_memory_utilization: 0.95
-  max_model_len: 8192
+  gpu_memory_utilization: 0.94
+  max_model_len: 16384
   phase1_max_model_len: 8192
-  phase2_max_model_len: 8192
+  phase2_max_model_len: 65536
   max_num_seqs: 256
   max_num_batched_tokens: 8192
   dtype: "auto"
@@ -57,7 +57,7 @@ evaluation:
 
 # === Async agentic settings (Phase 2) ===
 async:
-  concurrency: 32                           # Number of concurrent agentic queries across 8 DP replicas
+  concurrency: 8                           # Number of concurrent agentic queries across 8 DP replicas
   checkpoint_interval: 5                    # Save checkpoint every N completions
   planning_interval: 5                      # Number of steps before replanning
   max_steps: 30                             # Maximum execution steps per agent

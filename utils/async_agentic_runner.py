@@ -49,6 +49,17 @@ class CancellableOpenAIServerModel(OpenAIServerModel):
             raise
         if self.cancel_event.is_set():
             raise AgentCancelled()
+
+        # When using reasoning models with --reasoning-parser, outputs ending in
+        # stop sequences (such as planning steps ending with <end_plan>) reside
+        # entirely within reasoning_content. If content is empty/None, fall back
+        # to reasoning_content so smolagents receives the actual plan.
+        if not answer.content and answer.raw and getattr(answer.raw, "choices", None):
+            raw_msg = answer.raw.choices[0].message
+            reasoning = getattr(raw_msg, "reasoning_content", None) or getattr(raw_msg, "reasoning", None)
+            if reasoning:
+                answer.content = reasoning.replace("<end_plan>", "").strip()
+
         return answer
 
     def __call__(self, *args, **kwargs):
@@ -103,7 +114,7 @@ def _create_agent(model_config: dict,
         model=llm,
         planning_interval=planning_interval,
         max_steps=max_steps,
-        verbosity_level=LogLevel.INFO,
+        verbosity_level=LogLevel.ERROR,
     )
     return agent
 

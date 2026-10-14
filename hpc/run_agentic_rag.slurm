@@ -15,7 +15,7 @@
 #   sbatch hpc/run_agentic_rag.slurm --test-ids 4 12 20 49 56
 #
 #   # Two nodes (8 GPUs, e.g. GLM-5.3-Flash with Ray Data Parallel):
-#   sbatch --nodes=2 --ntasks=2 --cpus-per-task=56 --mem=0 --gpus-per-node=4 --gres-flags=disable-binding --exclusive --time=01:30:00 hpc/run_agentic_rag.slurm recipes/GLM-5.3-Flash.yaml
+#   sbatch --nodes=2 --ntasks=2 --cpus-per-task=56 --mem=0 --gpus-per-node=4 --gres-flags=disable-binding --exclusive --time=01:30:00 hpc/run_agentic_rag.slurm --local-env --nvme recipes/GLM-5.3-Flash.yaml
 #
 #   VLLM_MODEL_PATH=/path/to/model sbatch hpc/run_agentic_rag.slurm
 #
