@@ -16,6 +16,7 @@
 #
 #   # Two nodes (8 GPUs, e.g. GLM-5.3-Flash with Ray Data Parallel):
 #   sbatch --nodes=2 --ntasks=2 --cpus-per-task=56 --mem=0 --gpus-per-node=4 --gres-flags=disable-binding --exclusive --time=01:30:00 hpc/run_agentic_rag.slurm --local-env --nvme recipes/GLM-5.3-Flash.yaml
+#   sbatch --nodes=3 --ntasks=3 --cpus-per-task=56 --mem=0 --gpus-per-node=4 --gres-flags=disable-binding --exclusive --time=00:30:00 hpc/run_agentic_rag.slurm --local-env --nvme recipes/DeepSeek-V4-Flash.yaml
 #
 #   VLLM_MODEL_PATH=/path/to/model sbatch hpc/run_agentic_rag.slurm
 #
@@ -170,8 +171,8 @@ DP_SIZE_LOCAL="$(${RAG_PYTHON} -c "import yaml; print(yaml.safe_load(open('${RAG
 
 # MoE backend configuration: detect recipe preference
 MOE_BACKEND="$(${RAG_PYTHON} -c "import yaml; print(yaml.safe_load(open('${RAG_CONFIG}')).get('model', {}).get('moe_backend', ''))")"
-if [ "${MOE_BACKEND}" = "triton" ]; then
-    echo "MoE backend: Triton requested by recipe. Disabling DeepGEMM."
+if [ "${MOE_BACKEND}" = "triton" ] || [ "${MOE_BACKEND}" = "marlin" ]; then
+    echo "MoE backend: ${MOE_BACKEND} requested by recipe. Disabling DeepGEMM."
     export VLLM_MOE_USE_DEEP_GEMM=0
     export VLLM_USE_DEEP_GEMM=0
 else

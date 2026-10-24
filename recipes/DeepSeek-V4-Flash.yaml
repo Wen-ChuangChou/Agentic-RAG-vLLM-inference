@@ -1,0 +1,79 @@
+# ==========================================================================
+# Hybrid Agentic RAG Configuration — DeepSeek-V4-Flash (3 Nodes, 12 GPUs)
+# ==========================================================================
+# Three-phase pipeline:
+#   Phase 1 (Offline): Standard RAG + Vanilla via offline batch DP
+#   Phase 2 (Server):  Concurrent Agentic RAG via vLLM server (Ray) + asyncio
+#   Phase 3 (Offline): Judge evaluation via offline batch DP
+
+# === Main model (Phases 1 & 2) ===
+model:
+  model_id: "deepseek-ai/DeepSeek-V4-Flash"
+  model_path: ""                            # Set by VLLM_MODEL_PATH env var or NVMe staging
+  tensor_parallel_size: 1                   # If on 80GB GPUs and OOM occurs, set TP=4, DP=3, DP_local=1
+  data_parallel_size: 12                    # 3 nodes * 4 GPUs/node
+  data_parallel_size_local: 4               # 4 GPUs per node
+  enable_expert_parallel: true
+  all2all_backend: "allgather_reducescatter"
+  data_parallel_backend: "ray"
+  gpu_memory_utilization: 0.90              # DeepSeek-V4-Flash on Hopper/Blackwell is safer at <=0.90
+  max_model_len: 16384
+  phase1_max_model_len: 8192
+  phase2_max_model_len: 65536
+  max_num_seqs: 256
+  max_num_batched_tokens: 8192
+  dtype: "auto"
+  trust_remote_code: true
+  chat_template_kwargs:
+    thinking: true                          # DeepSeek-V4 thinking toggle
+    reasoning_effort: "high"                # Options: "high" or "max" (note: "max" requires >=384K max_model_len)
+  temperature: 1.0                          # DeepSeek-V4-Flash recommended temperature
+  top_p: 0.95                                # DeepSeek-V4-Flash recipe default (0.95 is also acceptable)
+  max_tokens: 4096                          # Increase to 4096+ if reasoning traces get truncated
+  enforce_eager: true                       # Keep true for Hopper/CSA+HCA stability if needed
+  moe_backend: "marlin"                     # Marlin supports MXFP4 with SILU activation on Hopper SM90 (Triton only supports SwiGLU)
+  offline_timeout: 3600
+
+# === vLLM server settings (Phase 2 only) ===
+server:
+  health_timeout: 2400                      # Cold startup timeout in seconds
+  port: 8000
+  api_key: "ai4all"
+  host: "0.0.0.0"
+  extra_args: ["--reasoning-parser", "deepseek_v4", "--default-chat-template-kwargs", '{"thinking": true, "reasoning_effort": "high"}']
+
+# === Evaluation judge model (Phase 3) ===
+evaluation:
+  model_id: "openai/gpt-oss-120b"
+  model_path: ""                            # Set by VLLM_JUDGE_MODEL_PATH env var
+  tensor_parallel_size: 1
+  data_parallel_size: 12                    # Scaled to 12 GPUs across 3 nodes
+  data_parallel_size_local: 4               # 4 GPUs per node
+  gpu_memory_utilization: 0.95
+  temperature: 0.0
+  max_model_len: 8192
+  max_tokens: 4096
+  enforce_eager: true
+  offline_timeout: 3600
+
+# === Async agentic settings (Phase 2) ===
+async:
+  concurrency: 12                           # Scaled to match 12 DP replicas across 3 nodes
+  checkpoint_interval: 5                    # Save checkpoint every N completions
+  planning_interval: 5                      # Number of steps before replanning
+  max_steps: 30                             # Maximum execution steps per agent
+
+# === Vector DB config ===
+vectordb:
+  batch_size: 50
+  max_workers: 4
+  doc_chunk_size: 100
+  text_chunk_size: 200
+  text_chunk_overlap: 40
+  force_rebuild: false
+  use_parallel: true
+
+# === Prompt config ===
+prompt:
+  agent_prompt_filename: "gemini_agent_system_prompt.yaml" # Prompt of Agentic RAG
+  judge_prompt_filename: "evaluation_prompt.yaml"          # Prompt of Judge LLM
