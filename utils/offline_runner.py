@@ -311,6 +311,8 @@ def _dp_offline_worker(
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+    time.sleep(1)
 
 
 def run_offline_dp_batch(
@@ -477,6 +479,8 @@ def run_offline_dp_batch(
                 if p != proc and p.is_alive():
                     _terminate_proc_tree(p)
             raise RuntimeError(f"DP worker PID {proc.pid} exited with code {proc.exitcode}.")
+
+    gc.collect()
 
     # Gather results
     if dp_node_rank == 0:

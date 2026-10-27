@@ -16,7 +16,7 @@
 #
 #   # Two nodes (8 GPUs, e.g. GLM-5.3-Flash with Ray Data Parallel):
 #   sbatch --nodes=2 --ntasks=2 --cpus-per-task=56 --mem=0 --gpus-per-node=4 --gres-flags=disable-binding --exclusive --time=01:30:00 hpc/run_agentic_rag.slurm --local-env --nvme recipes/GLM-5.3-Flash.yaml
-#   sbatch --nodes=3 --ntasks=3 --cpus-per-task=56 --mem=0 --gpus-per-node=4 --gres-flags=disable-binding --exclusive --time=00:30:00 hpc/run_agentic_rag.slurm --local-env --nvme recipes/DeepSeek-V4-Flash.yaml
+#   sbatch --nodes=3 --ntasks=3 --cpus-per-task=56 --mem=0 --gpus-per-node=4 --gres-flags=disable-binding --exclusive --time=01:30:00 hpc/run_agentic_rag.slurm --local-env --nvme recipes/DeepSeek-V4.1-Flash-1017.yaml
 #
 #   VLLM_MODEL_PATH=/path/to/model sbatch hpc/run_agentic_rag.slurm
 #
@@ -607,6 +607,14 @@ export TOKENIZERS_PARALLELISM=false                      # Suppress tokenizer wa
 export TORCH_FLOAT32_MATMUL_PRECISION=high               # TF32 on H100s
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True  # Reduce GPU memory fragmentation
 export VLLM_WORKER_MULTIPROC_METHOD=spawn                # Explicitly request spawn to quiet CUDA initialization warnings
+export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1200           # 20m execution timeout for long thinking traces & multi-node MoE all2all
+export TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=1200             # Watchdog timeout matching model execution timeout
+export NCCL_BUFFSIZE=16777216                            # 16MB buffer for high-throughput all2all EP over InfiniBand
+export NCCL_SOCKET_IFNAME=ibp3s0.0001,ibp,eno4           # Prioritize InfiniBand IPoIB subnet (172.24.192.0/20); avoid container interfaces
+export NCCL_IB_HCA=mlx5_2,mlx5_3,mlx5_4,mlx5_5           # Bind only to active 200Gb/s HCAs (mlx5_0 and mlx5_1 are PORT_DOWN on Capella)
+export NCCL_CROSS_NIC=1                                  # Enable multi-HCA routing across Hopper SXM5 rails
+export NCCL_DEBUG=WARN                                   # Log actionable NCCL warnings without spamming
+export NCCL_DEBUG_SUBSYS=INIT,COLL,ENV
 
 # ==========================================================================
 # NVMe Model Staging
@@ -618,21 +626,50 @@ resolve_model_source() {
     local EXPLICIT_PATH="$2"
 
     if [ -n "${EXPLICIT_PATH}" ] && [ -d "${EXPLICIT_PATH}" ]; then
-        echo "${EXPLICIT_PATH}"
-        return
+        if compgen -G "${EXPLICIT_PATH}/*.safetensors" >/dev/null || compgen -G "${EXPLICIT_PATH}/*.bin" >/dev/null || compgen -G "${EXPLICIT_PATH}/*.pt" >/dev/null; then
+            echo "${EXPLICIT_PATH}"
+            return
+        fi
+        echo "  [WARNING] Explicit path '${EXPLICIT_PATH}' does not contain weight files (*.safetensors, *.bin, *.pt)." >&2
     fi
 
-    # Delegate to HuggingFace python wrapper to perfectly lookup the snapshot directory
-    # Redirect stderr to avoid polluting the log if the model is somehow missing
-    python -c "
-import sys, warnings, logging
-logging.disable(logging.CRITICAL); warnings.filterwarnings('ignore')
-from huggingface_hub import snapshot_download
-try:
-    print(snapshot_download('${MODEL_ID}', local_files_only=True))
-except Exception:
-    pass
-" 2>/dev/null
+    # Lookup snapshot directory in HuggingFace cache directly
+    local HF_CACHE="${HF_HOME:-${HOME}/.cache/huggingface}/hub"
+    local REPO_DIR="${HF_CACHE}/models--${MODEL_ID//\//--}"
+    local CAND=""
+    if [ -f "${REPO_DIR}/refs/main" ]; then
+        local COMMIT
+        COMMIT=$(head -n 1 "${REPO_DIR}/refs/main" 2>/dev/null)
+        if [ -n "${COMMIT}" ] && [ -d "${REPO_DIR}/snapshots/${COMMIT}" ]; then
+            CAND="${REPO_DIR}/snapshots/${COMMIT}"
+        fi
+    fi
+
+    if [ -z "${CAND}" ] && [ -d "${REPO_DIR}/snapshots" ]; then
+        for d in "${REPO_DIR}/snapshots"/*/; do
+            if [ -d "${d}" ]; then
+                CAND="${d%/}"
+                break
+            fi
+        done
+    fi
+
+    # Crucial validation: ensure the snapshot actually contains model weight files
+    # and has no active or incomplete downloads in blobs/
+    if [ -n "${CAND}" ] && [ -d "${CAND}" ]; then
+        if compgen -G "${REPO_DIR}/blobs/*.incomplete" >/dev/null; then
+            echo "  [WARNING] Model '${MODEL_ID}' has active or incomplete downloads (*.incomplete) in blobs/. Skipping incomplete model." >&2
+            echo ""
+            return
+        fi
+        if compgen -G "${CAND}/*.safetensors" >/dev/null || compgen -G "${CAND}/*.bin" >/dev/null || compgen -G "${CAND}/*.pt" >/dev/null; then
+            echo "${CAND}"
+            return
+        else
+            echo "  [WARNING] Snapshot '${CAND}' contains no model weight files (*.safetensors, *.bin, *.pt)." >&2
+        fi
+    fi
+
     echo ""
 }
 
@@ -645,7 +682,12 @@ stage_to_nvme() {
 
     if [ -z "${SRC}" ] || [ ! -d "${SRC}" ]; then
         echo "Source not found for ${BASENAME}, skipping NVMe staging."
-        return
+        return 1
+    fi
+
+    if ! compgen -G "${SRC}/*.safetensors" >/dev/null && ! compgen -G "${SRC}/*.bin" >/dev/null && ! compgen -G "${SRC}/*.pt" >/dev/null; then
+        echo "  [ERROR] Source directory '${SRC}' for ${BASENAME} contains no weight files (*.safetensors, *.bin, *.pt). Skipping NVMe staging."
+        return 1
     fi
 
     echo "Staging ${BASENAME} to NVMe SSD ..."
@@ -679,6 +721,10 @@ if [ "${USE_NVME}" = "true" ]; then
     MAIN_SRC=$(resolve_model_source "${MODEL_NAME}" "${MODEL_PATH}")
     if [ -n "${MAIN_SRC}" ]; then
         stage_to_nvme "${MAIN_SRC}" "$(basename ${MODEL_NAME})" "VLLM_MODEL_PATH"
+    else
+        echo "  [ERROR] No valid local model weights found for main model '${MODEL_NAME}'."
+        echo "  Ensure the model is fully downloaded via: sbatch hpc/download_model.slurm ${MODEL_NAME}"
+        exit 1
     fi
 
     # Stage judge model (if different from main)
@@ -686,6 +732,8 @@ if [ "${USE_NVME}" = "true" ]; then
         JUDGE_SRC=$(resolve_model_source "${JUDGE_MODEL}" "${JUDGE_MODEL_PATH}")
         if [ -n "${JUDGE_SRC}" ]; then
             stage_to_nvme "${JUDGE_SRC}" "$(basename ${JUDGE_MODEL})" "VLLM_JUDGE_MODEL_PATH"
+        else
+            echo "  [WARNING] No complete local snapshot found for judge model '${JUDGE_MODEL}'. Skipping NVMe staging for judge."
         fi
     fi
 

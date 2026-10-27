@@ -248,7 +248,8 @@ def phase1_offline_batch(config, eval_dataset, retriever_tool,
         if rag_results is None:
             print("\n--- Standard RAG batch inference (Data Parallel) ---")
             t0 = time.time()
-            rag_answers = run_offline_dp_batch(conversations=rag_convos, sampling_params=sampling, **dp_kwargs)
+            rag_dp_kwargs = dict(dp_kwargs)
+            rag_answers = run_offline_dp_batch(conversations=rag_convos, sampling_params=sampling, **rag_dp_kwargs)
             t_rag = time.time() - t0
             print(f"Standard RAG batch completed in {t_rag:.1f}s")
             if (dp_args or {}).get("dp_node_rank", 0) == 0:
@@ -261,6 +262,8 @@ def phase1_offline_batch(config, eval_dataset, retriever_tool,
                 save_phase_results(rag_results, rag_ckpt, "standard_rag", elapsed_time=t_rag)
             else:
                 rag_results = []
+            _gpu_cleanup("Standard RAG batch")
+            time.sleep(5)
         else:
             t_rag = cached_rag_timing.get("elapsed_time") or 0.0
 
@@ -268,7 +271,10 @@ def phase1_offline_batch(config, eval_dataset, retriever_tool,
         if vanilla_results is None:
             print("\n--- Vanilla LLM batch inference (Data Parallel) ---")
             t0 = time.time()
-            vanilla_answers = run_offline_dp_batch(conversations=vanilla_convos, sampling_params=sampling, **dp_kwargs)
+            vanilla_dp_kwargs = dict(dp_kwargs)
+            # Rotate DP master port to prevent TIME_WAIT socket collision across multi-node workers
+            vanilla_dp_kwargs["dp_master_port"] = dp_kwargs.get("dp_master_port", 13345) + 2
+            vanilla_answers = run_offline_dp_batch(conversations=vanilla_convos, sampling_params=sampling, **vanilla_dp_kwargs)
             t_vanilla = time.time() - t0
             print(f"Vanilla batch completed in {t_vanilla:.1f}s")
             if (dp_args or {}).get("dp_node_rank", 0) == 0:
@@ -281,6 +287,8 @@ def phase1_offline_batch(config, eval_dataset, retriever_tool,
                 save_phase_results(vanilla_results, vanilla_ckpt, "standard", elapsed_time=t_vanilla)
             else:
                 vanilla_results = []
+            _gpu_cleanup("Vanilla batch")
+            time.sleep(5)
         else:
             t_vanilla = cached_vanilla_timing.get("elapsed_time") or 0.0
     else:
@@ -588,7 +596,7 @@ def phase3_judge(config, all_outputs, evaluation_prompt, checkpoints_dir, dp_arg
             dp_num_nodes=(dp_args or {}).get("dp_num_nodes", 1),
             dp_node_rank=(dp_args or {}).get("dp_node_rank", 0),
             dp_master_addr=(dp_args or {}).get("dp_master_addr", "127.0.0.1"),
-            dp_master_port=(dp_args or {}).get("dp_master_port", 13345),
+            dp_master_port=(dp_args or {}).get("dp_master_port", 13345) + 4,
         )
         judge_answers = run_offline_dp_batch(conversations=judge_convos, sampling_params=sampling, **judge_dp_kwargs)
     else:
