@@ -46,6 +46,7 @@ from utils.offline_runner import (
     run_offline_dp_batch,
     save_phase_results,
     load_phase_results,
+    strip_thinking,
 )
 from utils.vllm_server_manager import VLLMServerManager
 from utils.results_manager import save_evaluation_results
@@ -149,6 +150,100 @@ def _gpu_cleanup(label: str = "",
 # ===================================================================
 
 
+async def run_server_chat_batch(conversations, api_url: str, api_key: str, model_name: str,
+                                sampling_params: SamplingParams, concurrency: int = 16,
+                                request_timeout: float = 600.0):
+    """Run batch inference against a running vLLM OpenAI-compatible server.
+
+    Used for multi-node MoE DP/EP models (like DeepSeek-V4.1-Flash) to avoid
+    SPMD PyNccl all2all desync deadlocks during offline batching.
+    """
+    import httpx
+
+    results = [None] * len(conversations)
+    sem = asyncio.Semaphore(concurrency)
+    total = len(conversations)
+    completed = 0
+
+    async with httpx.AsyncClient(timeout=httpx.Timeout(request_timeout, connect=60.0)) as client:
+        async def call_one(idx, convo):
+            nonlocal completed
+            async with sem:
+                payload = {
+                    "model": model_name,
+                    "messages": convo,
+                    "temperature": getattr(sampling_params, "temperature", 1.0),
+                    "top_p": getattr(sampling_params, "top_p", 1.0),
+                    "max_tokens": getattr(sampling_params, "max_tokens", 4096),
+                }
+                resp = await client.post(
+                    f"{api_url}/chat/completions",
+                    json=payload,
+                    headers={"Authorization": f"Bearer {api_key}"}
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                choice = data["choices"][0]["message"]
+                content = choice.get("content") or ""
+                reasoning = choice.get("reasoning_content") or ""
+                ans = content if content.strip() else reasoning
+                results[idx] = strip_thinking(ans)
+                completed += 1
+                if completed % 5 == 0 or completed == total:
+                    print(f"  [Server Batch] Completed {completed}/{total} prompts...")
+
+        await asyncio.gather(*(call_one(i, convo) for i, convo in enumerate(conversations)))
+
+    return results
+
+
+async def run_server_chat_batch(conversations, api_url: str, api_key: str, model_name: str,
+                                sampling_params: SamplingParams, concurrency: int = 16,
+                                request_timeout: float = 600.0):
+    """Run batch inference against a running vLLM OpenAI-compatible server.
+
+    Used for multi-node MoE DP/EP models (like DeepSeek-V4.1-Flash) to avoid
+    SPMD PyNccl all2all desync deadlocks during offline batching.
+    """
+    import httpx
+
+    results = [None] * len(conversations)
+    sem = asyncio.Semaphore(concurrency)
+    total = len(conversations)
+    completed = 0
+
+    async with httpx.AsyncClient(timeout=httpx.Timeout(request_timeout, connect=60.0)) as client:
+        async def call_one(idx, convo):
+            nonlocal completed
+            async with sem:
+                payload = {
+                    "model": model_name,
+                    "messages": convo,
+                    "temperature": getattr(sampling_params, "temperature", 1.0),
+                    "top_p": getattr(sampling_params, "top_p", 1.0),
+                    "max_tokens": getattr(sampling_params, "max_tokens", 4096),
+                }
+                resp = await client.post(
+                    f"{api_url}/chat/completions",
+                    json=payload,
+                    headers={"Authorization": f"Bearer {api_key}"}
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                choice = data["choices"][0]["message"]
+                content = choice.get("content") or ""
+                reasoning = choice.get("reasoning_content") or ""
+                ans = content if content.strip() else reasoning
+                results[idx] = strip_thinking(ans)
+                completed += 1
+                if completed % 5 == 0 or completed == total:
+                    print(f"  [Server Batch] Completed {completed}/{total} prompts...")
+
+        await asyncio.gather(*(call_one(i, convo) for i, convo in enumerate(conversations)))
+
+    return results
+
+
 def phase1_offline_batch(config, eval_dataset, retriever_tool,
                          checkpoints_dir, dp_args=None):
     """
@@ -215,7 +310,122 @@ def phase1_offline_batch(config, eval_dataset, retriever_tool,
     t_rag = 0.0
     t_vanilla = 0.0
 
-    if dp_size > 1:
+    # Determine execution strategy for Phase 1:
+    # If using Ray-managed DP with Expert Parallelism (e.g. DeepSeek-V4.1-Flash across multi-node),
+    # offline SPMD LLM() processes cause all2all token routing deadlocks due to independent schedulers.
+    # We route through the vLLM Ray server which orchestrates continuous batching across all GPUs safely.
+    use_ray_server = (
+        dp_size > 1
+        and model_cfg.get("data_parallel_backend") == "ray"
+        and model_cfg.get("enable_expert_parallel", False)
+    )
+
+    if use_ray_server:
+        # Worker nodes (ranks 1..N-1): wait for head node to complete Phase 1
+        if (dp_args or {}).get("dp_node_rank", 0) != 0:
+            print(f"\n[DP Node {dp_args['dp_node_rank']}] Waiting for Phase 1 batch completions on head node...")
+            while not (rag_ckpt.exists() and vanilla_ckpt.exists()):
+                time.sleep(3)
+            print(f"[DP Node {dp_args['dp_node_rank']}] Phase 1 completion detected.")
+            return [], [], {"cached": True}
+
+        server_cfg = config.get("server", {})
+        async_cfg = config.get("async", {})
+        port = server_cfg.get("port", 8000)
+        api_key = server_cfg.get("api_key", "ai4all")
+
+        rag_results = cached_rag
+        vanilla_results = cached_vanilla
+
+        if rag_results is None or vanilla_results is None:
+            t_server_start = time.time()
+            print(f"\nStarting vLLM Ray server for Phase 1 MoE batch inference ({dp_size} DP replicas)...")
+            with VLLMServerManager(
+                model_id=model_id,
+                served_model_name=model_cfg["model_id"],
+                port=port,
+                api_key=api_key,
+                tensor_parallel_size=model_cfg.get("tensor_parallel_size", 1),
+                data_parallel_size=model_cfg.get("data_parallel_size"),
+                data_parallel_size_local=model_cfg.get("data_parallel_size_local"),
+                enable_expert_parallel=model_cfg.get("enable_expert_parallel", False),
+                all2all_backend=model_cfg.get("all2all_backend", "allgather_reducescatter"),
+                data_parallel_backend=model_cfg.get("data_parallel_backend", "ray"),
+                gpu_memory_utilization=model_cfg.get("gpu_memory_utilization", 0.92),
+                max_model_len=model_cfg.get("phase1_max_model_len", model_cfg.get("max_model_len", 8192)),
+                dtype=model_cfg.get("dtype", "auto"),
+                trust_remote_code=model_cfg.get("trust_remote_code", True),
+                enable_prefix_caching=True,
+                enforce_eager=model_cfg.get("enforce_eager", False),
+                moe_backend=model_cfg.get("moe_backend"),
+                attention_backend=model_cfg.get("attention_backend"),
+                extra_args=server_cfg.get("extra_args", []),
+                host=server_cfg.get("host", "0.0.0.0"),
+                log_dir=server_cfg.get("log_dir"),
+                health_timeout=server_cfg.get("health_timeout", 2400),
+                profile_imports=server_cfg.get("profile_imports", False),
+            ) as server:
+                t_server_ready = time.time() - t_server_start
+                t_load = t_server_ready
+
+                if rag_results is None:
+                    print("\n--- Standard RAG batch inference (vLLM Ray Server) ---")
+                    t0 = time.time()
+                    rag_answers = asyncio.run(
+                        run_server_chat_batch(
+                            conversations=rag_convos,
+                            api_url=server.url,
+                            api_key=api_key,
+                            model_name=model_cfg["model_id"],
+                            sampling_params=sampling,
+                            concurrency=async_cfg.get("concurrency", dp_size),
+                        )
+                    )
+                    t_rag = time.time() - t0
+                    print(f"Standard RAG batch completed in {t_rag:.1f}s")
+                    rag_results = [{
+                        "question": eval_dataset[i]["question"],
+                        "true_answer": eval_dataset[i]["answer"],
+                        "source_doc": eval_dataset[i]["source_doc"],
+                        "generated_answer": str(a),
+                    } for i, a in enumerate(rag_answers)]
+                    save_phase_results(rag_results, rag_ckpt, "standard_rag",
+                                       elapsed_time=t_rag, extra_timing={"model_load_seconds": t_load})
+                else:
+                    t_rag = cached_rag_timing.get("elapsed_time") or 0.0
+
+                if vanilla_results is None:
+                    print("\n--- Vanilla LLM batch inference (vLLM Ray Server) ---")
+                    t0 = time.time()
+                    vanilla_answers = asyncio.run(
+                        run_server_chat_batch(
+                            conversations=vanilla_convos,
+                            api_url=server.url,
+                            api_key=api_key,
+                            model_name=model_cfg["model_id"],
+                            sampling_params=sampling,
+                            concurrency=async_cfg.get("concurrency", dp_size),
+                        )
+                    )
+                    t_vanilla = time.time() - t0
+                    print(f"Vanilla batch completed in {t_vanilla:.1f}s")
+                    vanilla_results = [{
+                        "question": eval_dataset[i]["question"],
+                        "true_answer": eval_dataset[i]["answer"],
+                        "source_doc": eval_dataset[i]["source_doc"],
+                        "generated_answer": str(a),
+                    } for i, a in enumerate(vanilla_answers)]
+                    save_phase_results(vanilla_results, vanilla_ckpt, "standard", elapsed_time=t_vanilla)
+                else:
+                    t_vanilla = cached_vanilla_timing.get("elapsed_time") or 0.0
+
+            _gpu_cleanup("Phase 1 Server")
+            time.sleep(5)
+        else:
+            t_rag = cached_rag_timing.get("elapsed_time") or 0.0
+            t_vanilla = cached_vanilla_timing.get("elapsed_time") or 0.0
+
+    elif dp_size > 1:
         # Multi-process Data Parallel batch inference (from data_parallel_offline.py)
         dp_kwargs = dict(
             model_id=model_id,

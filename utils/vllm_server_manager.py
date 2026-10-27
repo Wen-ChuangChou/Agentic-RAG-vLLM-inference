@@ -186,6 +186,40 @@ class VLLMServerManager:
                     f"stderr (last 2000 chars):\n{stderr[-2000:]}"
                 )
 
+            # Check stderr and stdout logs for fatal worker/actor crash markers
+            fatal_markers = (
+                b"RuntimeError: Worker failed with error",
+                b"Exception raised in creation task: The actor died",
+                b"RayWorkerMonitor: unexpected error",
+                b"RayTaskError",
+                b"ActorDiedError",
+                b"torch.cuda.OutOfMemoryError",
+            )
+            for log_path in (self.stderr_path, self.stdout_path):
+                if log_path.exists():
+                    try:
+                        with log_path.open("rb") as f_log:
+                            f_log.seek(max(0, f_log.seek(0, 2) - 16384))
+                            chunk = f_log.read()
+                            for marker in fatal_markers:
+                                if marker in chunk:
+                                    time.sleep(2)
+                                    tail_err = ""
+                                    try:
+                                        f_log.seek(max(0, f_log.seek(0, 2) - 4000))
+                                        tail_err = f_log.read().decode(errors="replace")
+                                    except Exception:
+                                        pass
+                                    self.stop()
+                                    raise RuntimeError(
+                                        f"vLLM server worker/actor crashed during startup "
+                                        f"(detected '{marker.decode()}' in {log_path.name}).\n"
+                                        f"Log tail:\n{tail_err[-3000:]}"
+                                    )
+                    except (OSError, RuntimeError) as e:
+                        if isinstance(e, RuntimeError):
+                            raise
+
             try:
                 req = urllib.request.Request(health_url)
                 with urllib.request.urlopen(req, timeout=5) as resp:

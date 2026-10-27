@@ -557,12 +557,31 @@ else
 fi
 
 # ==========================================================================
+# Performance & Communication environment variables
+# ==========================================================================
+export OMP_NUM_THREADS=1                                 # Avoid CPU thread contention
+export VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1        # Better KV cache sizing
+export NCCL_ASYNC_ERROR_HANDLING=1                       # Crash on NCCL hangs
+export TOKENIZERS_PARALLELISM=false                      # Suppress tokenizer warnings
+export TORCH_FLOAT32_MATMUL_PRECISION=high               # TF32 on H100s
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True  # Reduce GPU memory fragmentation
+export VLLM_WORKER_MULTIPROC_METHOD=spawn                # Explicitly request spawn to quiet CUDA initialization warnings
+export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1200           # 20m execution timeout for long thinking traces & multi-node MoE all2all
+export TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=1200             # Watchdog timeout matching model execution timeout
+export NCCL_BUFFSIZE=16777216                            # 16MB buffer for high-throughput all2all EP over InfiniBand
+export NCCL_SOCKET_IFNAME=ibp3s0.0001,ibp,eno4           # Prioritize InfiniBand IPoIB subnet (172.24.192.0/20); avoid container interfaces
+export NCCL_IB_HCA=mlx5_2,mlx5_3,mlx5_4,mlx5_5           # Bind only to active 200Gb/s HCAs (mlx5_0 and mlx5_1 are PORT_DOWN on Capella)
+export NCCL_CROSS_NIC=1                                  # Enable multi-HCA routing across Hopper SXM5 rails
+export NCCL_DEBUG=WARN                                   # Log actionable NCCL warnings without spamming
+export NCCL_DEBUG_SUBSYS=INIT,COLL,ENV
+export VLLM_RAY_DP_PACK_STRATEGY=strict
+
+# ==========================================================================
 # Start Ray cluster across nodes (only when Ray backend is configured)
 # ==========================================================================
 RAY_STARTED=false
 if [ "${DP_BACKEND}" = "ray" ] || { [ "${NUM_NODES}" -gt 1 ] && [ "${DP_SIZE}" -gt 1 ]; }; then
     RAY_STARTED=true
-    export VLLM_RAY_DP_PACK_STRATEGY=strict
 
     echo "Starting Ray head on ${HEAD_NODE} (${HEAD_NODE_IP}:${RAY_PORT})..."
     "${RAY_BIN}" start --head \
@@ -575,9 +594,37 @@ if [ "${DP_BACKEND}" = "ray" ] || { [ "${NUM_NODES}" -gt 1 ] && [ "${DP_SIZE}" -
     if [ "${NUM_NODES}" -gt 1 ]; then
         WORKER_NODES=$(echo "${NODELIST}" | tail -n +2)
         echo "Starting Ray worker(s) on ${WORKER_NODES} via SSH daemonization..."
+
+        # Forward critical environment variables (local NVMe caches, InfiniBand NICs, timeouts) to remote Ray workers
+        RAY_WORKER_ENV="export PATH='${PATH}'; \
+export VIRTUAL_ENV='${VIRTUAL_ENV}'; \
+export VLLM_CACHE_ROOT='${VLLM_CACHE_ROOT}'; \
+export TORCHINDUCTOR_CACHE_DIR='${TORCHINDUCTOR_CACHE_DIR}'; \
+export TRITON_CACHE_DIR='${TRITON_CACHE_DIR}'; \
+export FLASHINFER_WORKSPACE_DIR='${FLASHINFER_WORKSPACE_DIR}'; \
+export FLASHINFER_WORKSPACE_BASE='${FLASHINFER_WORKSPACE_BASE}'; \
+export FLASHINFER_DISABLE_VERSION_CHECK=1; \
+export OMP_NUM_THREADS=1; \
+export VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1; \
+export NCCL_ASYNC_ERROR_HANDLING=1; \
+export TOKENIZERS_PARALLELISM=false; \
+export TORCH_FLOAT32_MATMUL_PRECISION=high; \
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True; \
+export VLLM_WORKER_MULTIPROC_METHOD=spawn; \
+export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1200; \
+export TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=1200; \
+export NCCL_BUFFSIZE=16777216; \
+export NCCL_SOCKET_IFNAME='${NCCL_SOCKET_IFNAME}'; \
+export NCCL_IB_HCA='${NCCL_IB_HCA}'; \
+export NCCL_CROSS_NIC=1; \
+export NCCL_DEBUG=WARN; \
+export NCCL_DEBUG_SUBSYS=INIT,COLL,ENV; \
+export VLLM_MOE_USE_DEEP_GEMM=${VLLM_MOE_USE_DEEP_GEMM:-0}; \
+export VLLM_RAY_DP_PACK_STRATEGY=strict;"
+
         for WORKER in ${WORKER_NODES}; do
             ssh -o BatchMode=yes -o StrictHostKeyChecking=no "${WORKER}" \
-                "CUDA_VISIBLE_DEVICES=0,1,2,3 '${RAY_BIN}' start \
+                "${RAY_WORKER_ENV} CUDA_VISIBLE_DEVICES=0,1,2,3 '${RAY_BIN}' start \
                     --address='${HEAD_NODE_IP}:${RAY_PORT}' \
                     --num-cpus='${SLURM_CPUS_PER_TASK:-56}' \
                     --num-gpus='${SLURM_GPUS_ON_NODE:-4}' \
@@ -597,24 +644,6 @@ if [ "${DP_BACKEND}" = "ray" ] || { [ "${NUM_NODES}" -gt 1 ] && [ "${DP_SIZE}" -
 else
     echo "Ray cluster not required (single-node non-Ray setup)."
 fi
-
-
-# --- Performance environment variables ---
-export OMP_NUM_THREADS=1                                 # Avoid CPU thread contention
-export VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1        # Better KV cache sizing
-export NCCL_ASYNC_ERROR_HANDLING=1                       # Crash on NCCL hangs
-export TOKENIZERS_PARALLELISM=false                      # Suppress tokenizer warnings
-export TORCH_FLOAT32_MATMUL_PRECISION=high               # TF32 on H100s
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True  # Reduce GPU memory fragmentation
-export VLLM_WORKER_MULTIPROC_METHOD=spawn                # Explicitly request spawn to quiet CUDA initialization warnings
-export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1200           # 20m execution timeout for long thinking traces & multi-node MoE all2all
-export TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=1200             # Watchdog timeout matching model execution timeout
-export NCCL_BUFFSIZE=16777216                            # 16MB buffer for high-throughput all2all EP over InfiniBand
-export NCCL_SOCKET_IFNAME=ibp3s0.0001,ibp,eno4           # Prioritize InfiniBand IPoIB subnet (172.24.192.0/20); avoid container interfaces
-export NCCL_IB_HCA=mlx5_2,mlx5_3,mlx5_4,mlx5_5           # Bind only to active 200Gb/s HCAs (mlx5_0 and mlx5_1 are PORT_DOWN on Capella)
-export NCCL_CROSS_NIC=1                                  # Enable multi-HCA routing across Hopper SXM5 rails
-export NCCL_DEBUG=WARN                                   # Log actionable NCCL warnings without spamming
-export NCCL_DEBUG_SUBSYS=INIT,COLL,ENV
 
 # ==========================================================================
 # NVMe Model Staging

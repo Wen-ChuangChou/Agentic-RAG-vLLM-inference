@@ -428,10 +428,16 @@ def run_offline_dp_batch(
     output_files = {}
     for local_dp_rank, global_dp_rank in enumerate(range(start_global_rank, end_global_rank)):
         s_start, s_end = get_shard_bounds(global_dp_rank)
-        shard = conversations[s_start:s_end]
+        shard = list(conversations[s_start:s_end])
         if len(shard) == 0:
             # Placeholder if rank has no prompts (vLLM DP requires all ranks active)
             shard = [[{"role": "user", "content": "Placeholder"}]]
+        elif enable_expert_parallel:
+            # In MoE EP mode, equalize request count across all ranks to prevent collective desync
+            max_shard_len = (len(conversations) + data_parallel_size - 1) // data_parallel_size
+            if len(shard) < max_shard_len:
+                dummy_prompt = [[{"role": "user", "content": "Hi"}]]
+                shard.extend(dummy_prompt * (max_shard_len - len(shard)))
 
         out_file = tmp_dir / f"dp_rank_{global_dp_rank}.json"
         output_files[global_dp_rank] = (out_file, s_start, s_end, len(conversations[s_start:s_end]))
