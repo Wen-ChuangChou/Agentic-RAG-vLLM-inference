@@ -59,6 +59,7 @@ evaluation:
 # === Async agentic settings (Phase 2) ===
 async:
   concurrency: 12                           # Scaled to match 12 DP replicas across 3 nodes
+  request_timeout: 300.0                    # Allow up to 300s for DeepSeek-V4 MoE reasoning decode traces
   checkpoint_interval: 5                    # Save checkpoint every N completions
   planning_interval: 5                      # Number of steps before replanning
   max_steps: 30                             # Maximum execution steps per agent
